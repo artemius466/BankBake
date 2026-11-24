@@ -1,0 +1,35 @@
+{
+  "name": "bankbake",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri",
+    "portable": "node scripts/package-portable.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "~2.10.0",
+    "@tauri-apps/plugin-dialog": "~2.6.0",
+    "@tauri-apps/plugin-fs": "~2.4.5",
+    "@tauri-apps/plugin-opener": "~2.5.0",
+    "clsx": "^2.1.1",
+    "lucide-svelte": "^0.475.0",
+    "tailwind-merge": "^3.0.1",
+    "wavesurfer.js": "^7.9.1"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@tauri-apps/cli": "~2.10.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.1",
+    "svelte": "^5.19.0",
+    "svelte-check": "^4.1.4",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11"
+  }
+}

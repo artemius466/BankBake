@@ -1,0 +1,20 @@
+# Rust / Tauri
+/src-tauri/target
+/src-tauri/gen
+
+# Node / Frontend
+/node_modules
+/dist
+
+# Build artifacts & local config
+/BakedBanks
+/release
+.bankbake.config.json
+bankbake.config.json
+.DS_Store
+
+# Stray FMOD Studio working folders
+/.user
+/.cache
+/Metadata
+/Plugins

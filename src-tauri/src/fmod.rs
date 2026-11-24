@@ -1,0 +1,1325 @@
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BakeMode {
+    Modding,
+    Standalone,
+}
+
+impl Default for BakeMode {
+    fn default() -> Self {
+        Self::Standalone
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppConfig {
+    #[serde(default)]
+    pub mode: BakeMode,
+    #[serde(default)]
+    pub fmod_compiler_path: Option<String>,
+    #[serde(default)]
+    pub output_directory: Option<String>,
+    #[serde(default = "default_true")]
+    pub build_master_banks: bool,
+    #[serde(default = "default_true")]
+    pub export_guids: bool,
+    #[serde(default)]
+    pub keep_temp_project: bool,
+    #[serde(default = "default_is_debug_build", skip_deserializing)]
+    pub is_debug_build: bool,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            mode: BakeMode::Standalone,
+            fmod_compiler_path: None,
+            output_directory: None,
+            build_master_banks: true,
+            export_guids: true,
+            keep_temp_project: false,
+            is_debug_build: cfg!(debug_assertions),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompilerInfo {
+    pub available: bool,
+    pub bundled_available: bool,
+    pub path: Option<String>,
+    pub source: String, // "configured", "bundled", "system", "not_found"
+    pub version: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioFileInfo {
+    pub path: String,
+    pub filename: String,
+    pub suggested_event_name: String,
+    pub size_bytes: u64,
+    pub extension: String,
+    pub duration_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum EventCategory {
+    Sfx,
+    Music,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BakeEventItem {
+    pub id: String,
+    pub file_path: String,
+    pub filename: String,
+    pub event_name: String,
+    pub category: EventCategory,
+    pub looping: bool,
+    pub volume_db: f64,
+    pub custom_loop_enabled: bool,
+    pub loop_start: f64,
+    pub loop_end: Option<f64>,
+    pub duration: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BakeBankRequest {
+    pub bank_name: String,
+    pub events: Vec<BakeEventItem>,
+    pub mode: Option<BakeMode>,
+    pub output_directory: Option<String>,
+    pub fmod_compiler_path: Option<String>,
+    pub build_master_banks: Option<bool>,
+    pub export_guids: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltFileEntry {
+    pub filename: String,
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BakeBankResult {
+    pub success: bool,
+    pub bank_name: String,
+    pub output_directory: String,
+    pub built_files: Vec<BuiltFileEntry>,
+    pub guids_content: Option<String>,
+    pub compiler_stdout: String,
+    pub compiler_stderr: String,
+    pub generated_script: String,
+    pub duration_ms: u64,
+    pub message: String,
+}
+
+/// Sanitize a filename stem into a clean FMOD event name
+pub fn sanitize_event_name(stem: &str) -> String {
+    let mut out = String::with_capacity(stem.len());
+    for c in stem.chars() {
+        if c.is_alphanumeric() || c == '_' || c == '-' {
+            out.push(c);
+        } else if c.is_whitespace() || c == '.' {
+            if !out.ends_with('_') {
+                out.push('_');
+            }
+        }
+    }
+    let trimmed = out.trim_matches('_').to_string();
+    if trimmed.is_empty() {
+        "untitled_event".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Sanitize a bank name
+pub fn sanitize_bank_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Bank name cannot be empty.".to_string());
+    }
+    let forbidden = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    if trimmed.chars().any(|c| forbidden.contains(&c)) {
+        return Err("Bank name contains invalid characters (< > : \" / \\ | ? *).".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Check if the bundled `fmodstudio/fmodstudiocl.exe` exists relative to the app or workspace
+pub fn find_bundled_compiler() -> Option<PathBuf> {
+    let mut candidate_roots: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidate_roots.push(cwd.join("fmodstudio"));
+        if let Some(parent) = cwd.parent() {
+            candidate_roots.push(parent.join("fmodstudio"));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidate_roots.push(exe_dir.join("fmodstudio"));
+            if let Some(p1) = exe_dir.parent() {
+                candidate_roots.push(p1.join("fmodstudio"));
+                if let Some(p2) = p1.parent() {
+                    candidate_roots.push(p2.join("fmodstudio"));
+                    if let Some(p3) = p2.parent() {
+                        candidate_roots.push(p3.join("fmodstudio"));
+                    }
+                }
+            }
+        }
+    }
+    candidate_roots.push(PathBuf::from("D:\\BankBake\\fmodstudio"));
+
+    for root in candidate_roots {
+        let cl = root.join("fmodstudiocl.exe");
+        if cl.exists() && cl.is_file() {
+            return Some(cl);
+        }
+    }
+    None
+}
+
+/// Discover FMOD Studio CLI executable (`fmodstudiocl.exe` or `fmodstudio.exe`)
+pub fn discover_compiler(custom_path: Option<&str>) -> CompilerInfo {
+    let bundled_exe = find_bundled_compiler();
+    let bundled_available = bundled_exe.is_some();
+
+    // 1. Check custom configured path if in debug mode OR if bundled compiler is missing
+    if cfg!(debug_assertions) || !bundled_available {
+        if let Some(cp) = custom_path {
+            let trimmed = cp.trim();
+            if !trimmed.is_empty() {
+                let p = PathBuf::from(trimmed);
+                let candidate = if p.is_dir() {
+                    let cl = p.join("fmodstudiocl.exe");
+                    if cl.exists() {
+                        cl
+                    } else {
+                        p.join("fmodstudio.exe")
+                    }
+                } else {
+                    p
+                };
+
+                if candidate.exists() && candidate.is_file() {
+                    return CompilerInfo {
+                        available: true,
+                        bundled_available,
+                        path: Some(candidate.to_string_lossy().to_string()),
+                        source: "configured".to_string(),
+                        version: Some("FMOD Studio 2.02".to_string()),
+                        message: format!("Using configured FMOD compiler at {}", candidate.display()),
+                    };
+                }
+            }
+        }
+    }
+
+    // 2. Check bundled fmodstudio folder
+    if let Some(cl) = bundled_exe {
+        return CompilerInfo {
+            available: true,
+            bundled_available: true,
+            path: Some(cl.to_string_lossy().to_string()),
+            source: "bundled".to_string(),
+            version: Some("FMOD Studio 2.02.35".to_string()),
+            message: format!("Bundled FMOD CLI Ready ({})", cl.display()),
+        };
+    }
+
+    // 3. Check standard system installation paths
+    let system_paths = [
+        "C:\\Program Files\\FMOD SoundSystem\\FMOD Studio 2.02.00\\fmodstudiocl.exe",
+        "C:\\Program Files\\FMOD SoundSystem\\FMOD Studio 2.03.00\\fmodstudiocl.exe",
+        "C:\\Program Files (x86)\\FMOD SoundSystem\\FMOD Studio 2.02.00\\fmodstudiocl.exe",
+    ];
+    for sp in system_paths {
+        let p = PathBuf::from(sp);
+        if p.exists() && p.is_file() {
+            return CompilerInfo {
+                available: true,
+                bundled_available: false,
+                path: Some(p.to_string_lossy().to_string()),
+                source: "system".to_string(),
+                version: Some("FMOD Studio 2.x".to_string()),
+                message: format!("System FMOD CLI found at {}", p.display()),
+            };
+        }
+    }
+
+    // Check Program Files\FMOD SoundSystem subdirectories dynamically
+    let prog_fmod = PathBuf::from("C:\\Program Files\\FMOD SoundSystem");
+    if prog_fmod.exists() && prog_fmod.is_dir() {
+        if let Ok(entries) = fs::read_dir(&prog_fmod) {
+            for entry in entries.flatten() {
+                let cl = entry.path().join("fmodstudiocl.exe");
+                if cl.exists() && cl.is_file() {
+                    return CompilerInfo {
+                        available: true,
+                        bundled_available: false,
+                        path: Some(cl.to_string_lossy().to_string()),
+                        source: "system".to_string(),
+                        version: Some("FMOD Studio 2.x".to_string()),
+                        message: format!("System FMOD CLI found at {}", cl.display()),
+                    };
+                }
+            }
+        }
+    }
+
+    CompilerInfo {
+        available: false,
+        bundled_available: false,
+        path: None,
+        source: "not_found".to_string(),
+        version: None,
+        message: "FMOD Studio CLI (fmodstudiocl.exe) not found. Configure path in Settings.".to_string(),
+    }
+}
+
+/// Fast WAV/OGG header duration probing fallback so backend can also report duration if available
+pub fn probe_audio_duration(path: &Path) -> Option<f64> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext == "wav" {
+        let bytes = fs::read(path).ok()?;
+        if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+            return None;
+        }
+        let mut pos = 12;
+        let mut byte_rate: u32 = 0;
+        let mut data_size: u32 = 0;
+        while pos + 8 <= bytes.len() {
+            let chunk_id = &bytes[pos..pos + 4];
+            let chunk_size = u32::from_le_bytes([
+                bytes[pos + 4],
+                bytes[pos + 5],
+                bytes[pos + 6],
+                bytes[pos + 7],
+            ]) as usize;
+            if chunk_id == b"fmt " && chunk_size >= 16 && pos + 8 + 16 <= bytes.len() {
+                byte_rate = u32::from_le_bytes([
+                    bytes[pos + 16],
+                    bytes[pos + 17],
+                    bytes[pos + 18],
+                    bytes[pos + 19],
+                ]);
+            } else if chunk_id == b"data" {
+                data_size = chunk_size as u32;
+                break;
+            }
+            pos += 8 + chunk_size + (chunk_size % 2);
+        }
+        if byte_rate > 0 && data_size > 0 {
+            return Some(data_size as f64 / byte_rate as f64);
+        }
+    } else if ext == "ogg" {
+        let bytes = fs::read(path).ok()?;
+        if bytes.len() > 28 && &bytes[0..4] == b"OggS" {
+            // In Vorbis first identification header: sample rate is at offset 28 + 12 = 40 (u32 LE)
+            if bytes.len() >= 44 && &bytes[29..35] == b"vorbis" {
+                let sample_rate =
+                    u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]);
+                if sample_rate > 0 {
+                    // Find last OggS page granule position
+                    let search_start = bytes.len().saturating_sub(65536);
+                    let tail = &bytes[search_start..];
+                    for i in (0..tail.len().saturating_sub(14)).rev() {
+                        if &tail[i..i + 4] == b"OggS" {
+                            let granule = u64::from_le_bytes([
+                                tail[i + 6],
+                                tail[i + 7],
+                                tail[i + 8],
+                                tail[i + 9],
+                                tail[i + 10],
+                                tail[i + 11],
+                                tail[i + 12],
+                                tail[i + 13],
+                            ]);
+                            if granule > 0 && granule != u64::MAX {
+                                return Some(granule as f64 / sample_rate as f64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn inspect_audio_file(path_str: &str) -> Result<AudioFileInfo, String> {
+    let path = PathBuf::from(path_str);
+    if !path.exists() || !path.is_file() {
+        return Err(format!("Audio file does not exist: {}", path_str));
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let allowed = ["wav", "ogg", "mp3", "flac", "aif", "aiff", "wma"];
+    if !allowed.contains(&ext.as_str()) {
+        return Err(format!(
+            "Unsupported audio format '.{}'. Supported formats: WAV, OGG, MP3, FLAC, AIFF, WMA.",
+            ext
+        ));
+    }
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio")
+        .to_string();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("event");
+    let suggested_event_name = sanitize_event_name(stem);
+    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    let duration_seconds = probe_audio_duration(&path);
+
+    Ok(AudioFileInfo {
+        path: path.to_string_lossy().to_string(),
+        filename,
+        suggested_event_name,
+        size_bytes: meta.len(),
+        extension: ext,
+        duration_seconds,
+    })
+}
+
+/// Generate the minimal valid FMOD Studio 2.02 skeleton project in `project_dir`
+pub fn create_temp_fmod_project(project_dir: &Path) -> Result<PathBuf, String> {
+    let meta_dir = project_dir.join("Metadata");
+    let subdirs = [
+        project_dir.join("Assets"),
+        meta_dir.clone(),
+        meta_dir.join("Asset"),
+        meta_dir.join("AudioFile"),
+        meta_dir.join("Bank"),
+        meta_dir.join("BankFolder"),
+        meta_dir.join("EffectPresetFolder"),
+        meta_dir.join("EncodingSetting"),
+        meta_dir.join("Event"),
+        meta_dir.join("EventFolder"),
+        meta_dir.join("Group"),
+        meta_dir.join("ParameterPresetFolder"),
+        meta_dir.join("Platform"),
+        meta_dir.join("ProfilerFolder"),
+        meta_dir.join("SandboxFolder"),
+        meta_dir.join("SnapshotGroup"),
+    ];
+
+    for d in &subdirs {
+        fs::create_dir_all(d).map_err(|e| format!("Failed to create directory {}: {}", d.display(), e))?;
+    }
+
+    let fspro_path = project_dir.join("BankBakeProject.fspro");
+    fs::write(
+        &fspro_path,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00" />
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir.join("Workspace.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="Workspace" id="{eca33bb7-c1b3-4fe2-9fef-b7789ec3bde5}">
+		<property name="builtBanksOutputDirectory">
+			<value>Build</value>
+		</property>
+		<relationship name="masterEventFolder">
+			<destination>{10626052-c98b-4665-b391-646f2512cecd}</destination>
+		</relationship>
+		<relationship name="masterTagFolder">
+			<destination>{1b486b69-30e1-4779-90d4-f45386aa7367}</destination>
+		</relationship>
+		<relationship name="masterEffectPresetFolder">
+			<destination>{aca7fd17-4939-0ce5-284c-74c26c487e44}</destination>
+		</relationship>
+		<relationship name="masterParameterPresetFolder">
+			<destination>{a418e0de-c7d0-05c9-280a-b529dc02e12e}</destination>
+		</relationship>
+		<relationship name="masterBankFolder">
+			<destination>{07fb52a7-88b7-4b50-aff5-5f9728462f36}</destination>
+		</relationship>
+		<relationship name="masterSandboxFolder">
+			<destination>{90f1921b-3a6d-4222-bafe-83641a15bccf}</destination>
+		</relationship>
+		<relationship name="masterAssetFolder">
+			<destination>{4c43130b-9186-4fb6-9d65-a9acdac70927}</destination>
+		</relationship>
+		<relationship name="mixer">
+			<destination>{204ed808-83ea-42f4-b502-9b293dd2b6ba}</destination>
+		</relationship>
+		<relationship name="profilerSessionFolder">
+			<destination>{26fc004a-e651-4c80-ac8f-6688d3221c0a}</destination>
+		</relationship>
+		<relationship name="platforms">
+			<destination>{c9f35dc9-139f-472b-8888-8ad9fad5168c}</destination>
+		</relationship>
+	</object>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir.join("Master.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="MixerMaster" id="{b78fd6e5-45cb-4125-915b-e8841bf2976e}">
+		<property name="name">
+			<value>Master Bus</value>
+		</property>
+		<relationship name="effectChain">
+			<destination>{92bdd82e-c037-4218-9180-212628eb7e62}</destination>
+		</relationship>
+		<relationship name="panner">
+			<destination>{f5190665-2c6e-4635-bf36-1e39c167ee36}</destination>
+		</relationship>
+		<relationship name="mixer">
+			<destination>{204ed808-83ea-42f4-b502-9b293dd2b6ba}</destination>
+		</relationship>
+	</object>
+	<object class="MixerBusEffectChain" id="{92bdd82e-c037-4218-9180-212628eb7e62}">
+		<relationship name="effects">
+			<destination>{93621478-1067-4bca-9c53-fc6d7d738a70}</destination>
+		</relationship>
+	</object>
+	<object class="MixerBusPanner" id="{f5190665-2c6e-4635-bf36-1e39c167ee36}">
+		<property name="overridingOutputFormat">
+			<value>2</value>
+		</property>
+	</object>
+	<object class="MixerBusFader" id="{93621478-1067-4bca-9c53-fc6d7d738a70}" />
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir.join("Mixer.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+    <object class="Mixer" id="{204ed808-83ea-42f4-b502-9b293dd2b6ba}">
+        <relationship name="masterBus">
+            <destination>{b78fd6e5-45cb-4125-915b-e8841bf2976e}</destination>
+        </relationship>
+        <relationship name="snapshotList">
+            <destination>{2e15ae1f-9888-48d4-9994-adc998ae281e}</destination>
+        </relationship>
+    </object>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Pre-create Music and SFX MixerGroups with Pizza Tower / standard FMOD bus GUIDs
+    fs::write(
+        meta_dir
+            .join("Group")
+            .join("{032f56ee-6215-4738-8d0b-f630b5c73daf}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="MixerGroup" id="{032f56ee-6215-4738-8d0b-f630b5c73daf}">
+		<property name="name">
+			<value>Music</value>
+		</property>
+		<relationship name="effectChain">
+			<destination>{dbc14ad0-a58d-478c-9e10-5df229e206c3}</destination>
+		</relationship>
+		<relationship name="panner">
+			<destination>{bfbace69-aa45-4e7f-b2ca-ef8f4c761769}</destination>
+		</relationship>
+		<relationship name="output">
+			<destination>{b78fd6e5-45cb-4125-915b-e8841bf2976e}</destination>
+		</relationship>
+	</object>
+	<object class="MixerBusEffectChain" id="{dbc14ad0-a58d-478c-9e10-5df229e206c3}">
+		<relationship name="effects">
+			<destination>{7fd423d2-f491-4d97-9ada-841c9377334e}</destination>
+		</relationship>
+	</object>
+	<object class="MixerBusPanner" id="{bfbace69-aa45-4e7f-b2ca-ef8f4c761769}" />
+	<object class="MixerBusFader" id="{7fd423d2-f491-4d97-9ada-841c9377334e}" />
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("Group")
+            .join("{f18d5877-3d50-41c0-b6c0-9be04ada9938}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="MixerGroup" id="{f18d5877-3d50-41c0-b6c0-9be04ada9938}">
+		<property name="name">
+			<value>SFX</value>
+		</property>
+		<relationship name="effectChain">
+			<destination>{fd2b0385-e5e7-4c14-8348-7ada37283192}</destination>
+		</relationship>
+		<relationship name="panner">
+			<destination>{e0d8b0f4-1b05-4412-9cdd-9994818597ad}</destination>
+		</relationship>
+		<relationship name="output">
+			<destination>{b78fd6e5-45cb-4125-915b-e8841bf2976e}</destination>
+		</relationship>
+	</object>
+	<object class="MixerBusEffectChain" id="{fd2b0385-e5e7-4c14-8348-7ada37283192}">
+		<relationship name="effects">
+			<destination>{a7a9dc9e-2051-44f7-8925-0ddb318ebacb}</destination>
+		</relationship>
+	</object>
+	<object class="MixerBusPanner" id="{e0d8b0f4-1b05-4412-9cdd-9994818597ad}" />
+	<object class="MixerBusFader" id="{a7a9dc9e-2051-44f7-8925-0ddb318ebacb}" />
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir.join("Tags.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="MasterTagFolder" id="{1b486b69-30e1-4779-90d4-f45386aa7367}">
+		<property name="name">
+			<value>Master</value>
+		</property>
+	</object>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("Asset")
+            .join("{4c43130b-9186-4fb6-9d65-a9acdac70927}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+    <object class="MasterAssetFolder" id="{4c43130b-9186-4fb6-9d65-a9acdac70927}"/>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("BankFolder")
+            .join("{07fb52a7-88b7-4b50-aff5-5f9728462f36}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+    <object class="MasterBankFolder" id="{07fb52a7-88b7-4b50-aff5-5f9728462f36}"/>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("Bank")
+            .join("{816d4737-171a-41e7-a9f0-32996ece71cb}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="Bank" id="{816d4737-171a-41e7-a9f0-32996ece71cb}">
+		<property name="name">
+			<value>Master</value>
+		</property>
+		<property name="isMasterBank">
+			<value>true</value>
+		</property>
+		<relationship name="folder">
+			<destination>{07fb52a7-88b7-4b50-aff5-5f9728462f36}</destination>
+		</relationship>
+	</object>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("EffectPresetFolder")
+            .join("{aca7fd17-4939-0ce5-284c-74c26c487e44}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+    <object class="MasterEffectPresetFolder" id="{aca7fd17-4939-0ce5-284c-74c26c487e44}"/>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("ParameterPresetFolder")
+            .join("{a418e0de-c7d0-05c9-280a-b529dc02e12e}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+    <object class="MasterParameterPresetFolder" id="{a418e0de-c7d0-05c9-280a-b529dc02e12e}"/>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("EventFolder")
+            .join("{10626052-c98b-4665-b391-646f2512cecd}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+    <object class="MasterEventFolder" id="{10626052-c98b-4665-b391-646f2512cecd}">
+        <property name="name">
+            <value>Master</value>
+        </property>
+    </object>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("Platform")
+            .join("{c9f35dc9-139f-472b-8888-8ad9fad5168c}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+    <object class="Platform" id="{c9f35dc9-139f-472b-8888-8ad9fad5168c}">
+        <property name="hardwareType">
+            <value>0</value>
+        </property>
+        <property name="name">
+            <value>Desktop</value>
+        </property>
+        <property name="subDirectory">
+            <value>Desktop</value>
+        </property>
+        <property name="speakerFormat">
+            <value>5</value>
+        </property>
+    </object>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("EncodingSetting")
+            .join("{fa3463e9-0731-437c-8bee-4e68a4d3ffea}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+    <object class="EncodingSetting" id="{fa3463e9-0731-437c-8bee-4e68a4d3ffea}">
+        <property name="encodingFormat">
+            <value>3</value>
+        </property>
+        <property name="quality">
+            <value>37</value>
+        </property>
+        <relationship name="platform">
+            <destination>{c9f35dc9-139f-472b-8888-8ad9fad5168c}</destination>
+        </relationship>
+        <relationship name="encodable">
+            <destination>{c9f35dc9-139f-472b-8888-8ad9fad5168c}</destination>
+        </relationship>
+    </object>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("ProfilerFolder")
+            .join("{26fc004a-e651-4c80-ac8f-6688d3221c0a}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="ProfilerSessionFolder" id="{26fc004a-e651-4c80-ac8f-6688d3221c0a}" />
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("SandboxFolder")
+            .join("{90f1921b-3a6d-4222-bafe-83641a15bccf}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="MasterSandboxFolder" id="{90f1921b-3a6d-4222-bafe-83641a15bccf}" />
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::write(
+        meta_dir
+            .join("SnapshotGroup")
+            .join("{2e15ae1f-9888-48d4-9994-adc998ae281e}.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<objects serializationModel="Studio.02.02.00">
+	<object class="SnapshotList" id="{2e15ae1f-9888-48d4-9994-adc998ae281e}">
+		<relationship name="mixer">
+			<destination>{204ed808-83ea-42f4-b502-9b293dd2b6ba}</destination>
+		</relationship>
+	</object>
+</objects>
+"#,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(fspro_path)
+}
+
+fn escape_js_string(s: &str) -> String {
+    s.replace('\\', "/")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "")
+}
+
+/// Parse an event path like `event:/sfx/player/jump`, `/sfx/player/jump`, or `jump`
+/// into `(folder_segments, leaf_event_name)`.
+/// If no folder segments are present, falls back to `"music"` or `"sfx"` based on `category`.
+pub fn parse_event_hierarchy(raw_event_name: &str, category: &EventCategory) -> Result<(Vec<String>, String), String> {
+    let mut s = raw_event_name.trim().replace('\\', "/");
+    if s.len() >= 7 && s[..7].eq_ignore_ascii_case("event:/") {
+        s = s[7..].to_string();
+    } else if s.len() >= 6 && s[..6].eq_ignore_ascii_case("event:") {
+        s = s[6..].to_string();
+    }
+    let s = s.trim_matches('/');
+    let segments: Vec<String> = s
+        .split('/')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect();
+
+    if segments.is_empty() {
+        return Err("Event path cannot be empty (e.g. event:/sfx/my_sound).".to_string());
+    }
+
+    let forbidden = ['<', '>', ':', '"', '|', '?', '*'];
+    for seg in &segments {
+        if seg.chars().any(|c| forbidden.contains(&c)) {
+            return Err(format!(
+                "Event path segment '{}' contains invalid characters (< > : \" | ? *).",
+                seg
+            ));
+        }
+    }
+
+    if segments.len() == 1 {
+        let default_folder = match category {
+            EventCategory::Music => "music".to_string(),
+            EventCategory::Sfx => "sfx".to_string(),
+        };
+        Ok((vec![default_folder], segments[0].clone()))
+    } else {
+        let leaf = segments.last().unwrap().clone();
+        let folders = segments[..segments.len() - 1].to_vec();
+        Ok((folders, leaf))
+    }
+}
+
+/// Generate the FMOD Studio JavaScript automation script for the given bake request
+pub fn generate_fmod_bake_script(bank_name: &str, events: &[BakeEventItem], export_guids: bool) -> String {
+    let mut script = String::new();
+    script.push_str("// Generated by BankBake\n");
+    script.push_str("(function() {\n");
+    script.push_str("    console.log('[BankBake] Initializing FMOD project build...');\n");
+
+    let escaped_bank = escape_js_string(bank_name);
+    if bank_name.eq_ignore_ascii_case("Master") {
+        script.push_str("    var targetBank = studio.project.lookup('bank:/Master');\n");
+    } else {
+        script.push_str("    var targetBank = studio.project.create('Bank');\n");
+        script.push_str(&format!("    targetBank.name = \"{}\";\n", escaped_bank));
+        script.push_str("    targetBank.folder = studio.project.workspace.masterBankFolder;\n");
+    }
+
+    script.push_str("    var folderCache = {};\n");
+    script.push_str("    function getOrCreateFolderChain(segments) {\n");
+    script.push_str("        var currentParent = studio.project.workspace.masterEventFolder;\n");
+    script.push_str("        var pathKey = '';\n");
+    script.push_str("        for (var i = 0; i < segments.length; i++) {\n");
+    script.push_str("            var seg = segments[i];\n");
+    script.push_str("            pathKey = pathKey ? (pathKey + '/' + seg.toLowerCase()) : seg.toLowerCase();\n");
+    script.push_str("            if (!folderCache[pathKey]) {\n");
+    script.push_str("                var f = studio.project.create('EventFolder');\n");
+    script.push_str("                f.name = seg;\n");
+    script.push_str("                f.folder = currentParent;\n");
+    script.push_str("                folderCache[pathKey] = f;\n");
+    script.push_str("            }\n");
+    script.push_str("            currentParent = folderCache[pathKey];\n");
+    script.push_str("        }\n");
+    script.push_str("        return currentParent;\n");
+    script.push_str("    }\n\n");
+
+    script.push_str("    var musicBus = studio.project.lookup('bus:/Music') || studio.project.lookup('{032f56ee-6215-4738-8d0b-f630b5c73daf}');\n");
+    script.push_str("    if (!musicBus) {\n");
+    script.push_str("        musicBus = studio.project.create('MixerGroup');\n");
+    script.push_str("        musicBus.name = 'Music';\n");
+    script.push_str("        musicBus.output = studio.project.workspace.mixer.masterBus;\n");
+    script.push_str("    }\n\n");
+
+    script.push_str("    var sfxBus = studio.project.lookup('bus:/SFX') || studio.project.lookup('{f18d5877-3d50-41c0-b6c0-9be04ada9938}');\n");
+    script.push_str("    if (!sfxBus) {\n");
+    script.push_str("        sfxBus = studio.project.create('MixerGroup');\n");
+    script.push_str("        sfxBus.name = 'SFX';\n");
+    script.push_str("        sfxBus.output = studio.project.workspace.mixer.masterBus;\n");
+    script.push_str("    }\n\n");
+
+    for (idx, item) in events.iter().enumerate() {
+        let escaped_path = escape_js_string(&item.file_path);
+        let (folders, leaf_name) = parse_event_hierarchy(&item.event_name, &item.category)
+            .unwrap_or_else(|_| (vec!["sfx".to_string()], "untitled_event".to_string()));
+        let escaped_leaf_name = escape_js_string(&leaf_name);
+        let folders_js_array = folders
+            .iter()
+            .map(|f| format!("\"{}\"", escape_js_string(f)))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let is_music = item.category == EventCategory::Music;
+        let bus_var = if is_music { "musicBus" } else { "sfxBus" };
+
+        script.push_str(&format!(
+            "    // Event #{}: event:/{}/{}\n",
+            idx + 1,
+            folders.join("/"),
+            escaped_leaf_name
+        ));
+        script.push_str(&format!(
+            "    var asset_{idx} = studio.project.importAudioFile(\"{escaped_path}\");\n"
+        ));
+        script.push_str(&format!(
+            "    if (!asset_{idx}) {{\n        console.error('[BankBake] Failed to import audio file: {escaped_path}');\n    }} else {{\n"
+        ));
+        if is_music {
+            script.push_str(&format!("        asset_{idx}.isStreaming = true;\n"));
+        }
+        script.push_str(&format!(
+            "        var ev_{idx} = studio.project.create('Event');\n"
+        ));
+        script.push_str(&format!(
+            "        ev_{idx}.name = \"{escaped_leaf_name}\";\n"
+        ));
+        script.push_str(&format!(
+            "        ev_{idx}.folder = getOrCreateFolderChain([{folders_js_array}]);\n"
+        ));
+        script.push_str(&format!(
+            "        ev_{idx}.mixerInput.output = {bus_var};\n"
+        ));
+        script.push_str(&format!(
+            "        var trk_{idx} = ev_{idx}.addGroupTrack('Audio 1');\n"
+        ));
+        if item.volume_db.abs() > 0.001 {
+            script.push_str(&format!(
+                "        trk_{idx}.mixerGroup.volume = {:.3};\n",
+                item.volume_db
+            ));
+        }
+        script.push_str(&format!(
+            "        var clipLen_{idx} = asset_{idx}.length > 0 ? asset_{idx}.length : {:.4};\n",
+            if item.duration > 0.0 { item.duration } else { 1.0 }
+        ));
+        script.push_str(&format!(
+            "        var snd_{idx} = trk_{idx}.addSound(ev_{idx}.timeline, 'SingleSound', 0, clipLen_{idx});\n"
+        ));
+        script.push_str(&format!("        snd_{idx}.audioFile = asset_{idx};\n"));
+
+        if item.looping {
+            script.push_str(&format!(
+                "        ev_{idx}.automatableProperties.isPersistent = true;\n"
+            ));
+            script.push_str(&format!(
+                "        var mTrk_{idx} = ev_{idx}.markerTracks[0] || ev_{idx}.addMarkerTrack();\n"
+            ));
+            let start = item.loop_start.max(0.0);
+            if item.custom_loop_enabled {
+                if let Some(end) = item.loop_end {
+                    let valid_end = if end > start { end } else { start + 0.1 };
+                    let loop_len = valid_end - start;
+                    script.push_str(&format!(
+                        "        var lStart_{idx} = Math.min({:.4}, Math.max(0, clipLen_{idx} - 0.01));\n",
+                        start
+                    ));
+                    script.push_str(&format!(
+                        "        var lLen_{idx} = Math.max(0.01, Math.min({:.4}, clipLen_{idx} - lStart_{idx}));\n",
+                        loop_len
+                    ));
+                    script.push_str(&format!(
+                        "        mTrk_{idx}.addRegion(lStart_{idx}, lLen_{idx}, 'Loop', studio.project.regionLoopMode.Looping);\n"
+                    ));
+                } else {
+                    script.push_str(&format!(
+                        "        var lStart_{idx} = Math.min({:.4}, Math.max(0, clipLen_{idx} - 0.01));\n",
+                        start
+                    ));
+                    script.push_str(&format!(
+                        "        var lLen_{idx} = Math.max(0.01, clipLen_{idx} - lStart_{idx});\n"
+                    ));
+                    script.push_str(&format!(
+                        "        mTrk_{idx}.addRegion(lStart_{idx}, lLen_{idx}, 'Loop', studio.project.regionLoopMode.Looping);\n"
+                    ));
+                }
+            } else {
+                script.push_str(&format!(
+                    "        mTrk_{idx}.addRegion(0, clipLen_{idx}, 'Loop', studio.project.regionLoopMode.Looping);\n"
+                ));
+            }
+        }
+
+        script.push_str(&format!(
+            "        ev_{idx}.relationships.banks.add(targetBank);\n"
+        ));
+        script.push_str("    }\n\n");
+    }
+
+    script.push_str("    var saved = studio.project.save();\n");
+    script.push_str("    console.log('[BankBake] Project saved: ' + saved);\n");
+    script.push_str("    var built = studio.project.build();\n");
+    script.push_str("    console.log('[BankBake] Project built: ' + built);\n");
+    if export_guids {
+        script.push_str("    var exported = studio.project.exportGUIDs();\n");
+        script.push_str("    console.log('[BankBake] GUIDs exported: ' + exported);\n");
+    }
+    script.push_str("})();\n");
+
+    script
+}
+
+/// Execute the full bank compilation workflow
+pub fn execute_bake_bank(request: &BakeBankRequest, config: &AppConfig) -> Result<BakeBankResult, String> {
+    let start_instant = std::time::Instant::now();
+
+    let bank_name = sanitize_bank_name(&request.bank_name)?;
+    if request.events.is_empty() {
+        return Err("Please add at least one audio event before baking a bank.".to_string());
+    }
+
+    // Validate each event
+    let mut seen_names = std::collections::HashSet::new();
+    for ev in &request.events {
+        let (folders, leaf_name) = parse_event_hierarchy(&ev.event_name, &ev.category)
+            .map_err(|e| format!("Invalid event path for '{}': {}", ev.filename, e))?;
+        let canonical_path = format!(
+            "event:/{}/{}",
+            folders.join("/").to_lowercase(),
+            leaf_name.to_lowercase()
+        );
+        let p = PathBuf::from(&ev.file_path);
+        if !p.exists() || !p.is_file() {
+            return Err(format!("Source audio file not found: {}", ev.file_path));
+        }
+        if !seen_names.insert(canonical_path.clone()) {
+            return Err(format!(
+                "Duplicate event path 'event:/{}/{}'. Each event must have a unique path.",
+                folders.join("/"),
+                leaf_name
+            ));
+        }
+        if ev.looping && ev.custom_loop_enabled {
+            if ev.loop_start < 0.0 {
+                return Err(format!("Loop start cannot be negative for event '{}'.", ev.event_name));
+            }
+            if let Some(end) = ev.loop_end {
+                if end <= ev.loop_start {
+                    return Err(format!(
+                        "Loop end ({:.2}s) must be greater than loop start ({:.2}s) for event '{}'.",
+                        end, ev.loop_start, ev.event_name
+                    ));
+                }
+            }
+        }
+    }
+
+    // Discover compiler (custom path override is used in debug builds or when bundled compiler is missing)
+    let compiler_override = request
+        .fmod_compiler_path
+        .as_deref()
+        .or(config.fmod_compiler_path.as_deref());
+    let compiler_info = discover_compiler(compiler_override);
+    let compiler_exe = compiler_info
+        .path
+        .ok_or_else(|| "FMOD Studio CLI compiler (fmodstudiocl.exe) could not be found.".to_string())?;
+
+    // Determine output directory
+    let out_dir_str = request
+        .output_directory
+        .as_deref()
+        .or(config.output_directory.as_deref())
+        .filter(|s| !s.trim().is_empty());
+
+    let output_dir = if let Some(d) = out_dir_str {
+        PathBuf::from(d)
+    } else if let Ok(cwd) = std::env::current_dir() {
+        let root = if cwd.ends_with("src-tauri") {
+            cwd.parent().unwrap_or(&cwd).to_path_buf()
+        } else {
+            cwd
+        };
+        root.join("BakedBanks")
+    } else {
+        PathBuf::from("BakedBanks")
+    };
+
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Failed to create output directory {}: {}", output_dir.display(), e))?;
+
+    // Create isolated temporary build workspace
+    let build_id = Uuid::new_v4().to_string();
+    let temp_root = std::env::temp_dir()
+        .join("BankBakeBuilds")
+        .join(&build_id);
+
+    // Fallback to workspace local temp directory if system temp dir is not writable
+    let temp_workspace = if fs::create_dir_all(&temp_root).is_ok() {
+        temp_root
+    } else {
+        let fallback = output_dir.join(".bankbake_tmp").join(&build_id);
+        fs::create_dir_all(&fallback)
+            .map_err(|e| format!("Failed to create temp build directory: {}", e))?;
+        fallback
+    };
+
+    let project_dir = temp_workspace.join("Project");
+    let local_appdata = temp_workspace.join("LocalAppData");
+    let roaming_appdata = temp_workspace.join("AppData");
+    let temp_env_dir = temp_workspace.join("Temp");
+    let _ = fs::create_dir_all(&local_appdata);
+    let _ = fs::create_dir_all(&roaming_appdata);
+    let _ = fs::create_dir_all(&temp_env_dir);
+
+    let fspro_path = create_temp_fmod_project(&project_dir)?;
+    let build_master = request.build_master_banks.unwrap_or(config.build_master_banks);
+    let export_guids = request.export_guids.unwrap_or(config.export_guids);
+    let keep_temp = cfg!(debug_assertions) && config.keep_temp_project;
+
+    let js_code = generate_fmod_bake_script(&bank_name, &request.events, export_guids);
+    let script_path = project_dir.join("bake.js");
+    fs::write(&script_path, &js_code)
+        .map_err(|e| format!("Failed to write bake.js script: {}", e))?;
+
+    // Execute fmodstudiocl.exe
+    let output = Command::new(&compiler_exe)
+        .arg("-script")
+        .arg(&script_path)
+        .arg(&fspro_path)
+        .env("LOCALAPPDATA", &local_appdata)
+        .env("APPDATA", &roaming_appdata)
+        .env("TEMP", &temp_env_dir)
+        .env("TMP", &temp_env_dir)
+        .output()
+        .map_err(|e| format!("Failed to execute FMOD compiler ({}): {}", compiler_exe, e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let built_desktop_dir = project_dir.join("Build").join("Desktop");
+    let target_bank_file = built_desktop_dir.join(format!("{}.bank", bank_name));
+
+    if !target_bank_file.exists() {
+        if !keep_temp {
+            let _ = fs::remove_dir_all(&temp_workspace);
+        }
+        return Err(format!(
+            "FMOD compiler finished without producing '{}.bank'.\nCompiler output:\n{}\n{}",
+            bank_name, stdout, stderr
+        ));
+    }
+
+    let mut built_files: Vec<BuiltFileEntry> = Vec::new();
+
+    // Copy target bank
+    let dest_bank = output_dir.join(format!("{}.bank", bank_name));
+    fs::copy(&target_bank_file, &dest_bank)
+        .map_err(|e| format!("Failed to copy built bank to output directory: {}", e))?;
+    if let Ok(m) = fs::metadata(&dest_bank) {
+        built_files.push(BuiltFileEntry {
+            filename: format!("{}.bank", bank_name),
+            path: dest_bank.to_string_lossy().to_string(),
+            size_bytes: m.len(),
+        });
+    }
+
+    // Copy Master.bank and Master.strings.bank if requested and not already the target bank
+    if build_master {
+        for master_name in ["Master.bank", "Master.strings.bank"] {
+            if master_name.eq_ignore_ascii_case(&format!("{}.bank", bank_name)) {
+                continue;
+            }
+            let src = built_desktop_dir.join(master_name);
+            if src.exists() {
+                let dst = output_dir.join(master_name);
+                if fs::copy(&src, &dst).is_ok() {
+                    if let Ok(m) = fs::metadata(&dst) {
+                        built_files.push(BuiltFileEntry {
+                            filename: master_name.to_string(),
+                            path: dst.to_string_lossy().to_string(),
+                            size_bytes: m.len(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Copy GUIDs.txt if exported
+    let mut guids_content = None;
+    if export_guids {
+        let guids_src = project_dir.join("Build").join("GUIDs.txt");
+        if guids_src.exists() {
+            if let Ok(txt) = fs::read_to_string(&guids_src) {
+                guids_content = Some(txt);
+            }
+            let guids_dst = output_dir.join("GUIDs.txt");
+            if fs::copy(&guids_src, &guids_dst).is_ok() {
+                if let Ok(m) = fs::metadata(&guids_dst) {
+                    built_files.push(BuiltFileEntry {
+                        filename: "GUIDs.txt".to_string(),
+                        path: guids_dst.to_string_lossy().to_string(),
+                        size_bytes: m.len(),
+                    });
+                }
+            }
+        }
+    }
+
+    if !keep_temp {
+        let _ = fs::remove_dir_all(&temp_workspace);
+    }
+
+    let duration_ms = start_instant.elapsed().as_millis() as u64;
+
+    Ok(BakeBankResult {
+        success: true,
+        bank_name: bank_name.clone(),
+        output_directory: output_dir.to_string_lossy().to_string(),
+        built_files,
+        guids_content,
+        compiler_stdout: stdout,
+        compiler_stderr: stderr,
+        generated_script: js_code,
+        duration_ms,
+        message: format!(
+            "Successfully baked {}.bank ({} event{}) in {:.2}s",
+            bank_name,
+            request.events.len(),
+            if request.events.len() == 1 { "" } else { "s" },
+            duration_ms as f64 / 1000.0
+        ),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_discover_bundled_fmod_and_bake_bank() {
+        let info = discover_compiler(None);
+        assert!(info.available, "Expected bundled FMOD Studio CLI to be discovered: {:?}", info);
+
+        let sample_ogg = PathBuf::from(
+            "D:\\BankBake\\samples\\ui_cancel.ogg",
+        );
+        assert!(sample_ogg.exists(), "Sample OGG asset must exist");
+
+        let inspected = inspect_audio_file(&sample_ogg.to_string_lossy()).expect("inspect audio");
+        assert_eq!(inspected.suggested_event_name, "ui_cancel");
+        assert!(inspected.duration_seconds.unwrap_or(0.0) > 0.5);
+
+        let out_dir = PathBuf::from(
+            "C:\\Users\\Sasha\\.gemini\\antigravity\\brain\\057f2634-4f94-49e2-adbe-3cf802a33de8\\scratch\\rust_bake_test_out",
+        );
+        let _ = fs::remove_dir_all(&out_dir);
+
+        let req = BakeBankRequest {
+            bank_name: "RustTestBank".to_string(),
+            events: vec![
+                BakeEventItem {
+                    id: "1".to_string(),
+                    file_path: sample_ogg.to_string_lossy().to_string(),
+                    filename: "ui_cancel.ogg".to_string(),
+                    event_name: "event:/sfx/player/ui_cancel_sfx".to_string(),
+                    category: EventCategory::Sfx,
+                    looping: false,
+                    volume_db: -1.5,
+                    custom_loop_enabled: false,
+                    loop_start: 0.0,
+                    loop_end: None,
+                    duration: 1.026,
+                },
+                BakeEventItem {
+                    id: "2".to_string(),
+                    file_path: sample_ogg.to_string_lossy().to_string(),
+                    filename: "ui_cancel.ogg".to_string(),
+                    event_name: "event:/music/menu_loop_bgm".to_string(),
+                    category: EventCategory::Music,
+                    looping: true,
+                    volume_db: -3.0,
+                    custom_loop_enabled: true,
+                    loop_start: 0.1,
+                    loop_end: Some(0.9),
+                    duration: 1.026,
+                },
+            ],
+            mode: Some(BakeMode::Standalone),
+            output_directory: Some(out_dir.to_string_lossy().to_string()),
+            fmod_compiler_path: info.path.clone(),
+            build_master_banks: Some(true),
+            export_guids: Some(true),
+        };
+
+        let mut cfg = AppConfig::default();
+        cfg.output_directory = Some(out_dir.to_string_lossy().to_string());
+
+        let result = execute_bake_bank(&req, &cfg).expect("Bake bank should succeed");
+        assert!(result.success);
+        assert!(out_dir.join("RustTestBank.bank").exists());
+        assert!(out_dir.join("Master.bank").exists());
+        assert!(out_dir.join("Master.strings.bank").exists());
+        assert!(out_dir.join("GUIDs.txt").exists());
+        let guids = result.guids_content.expect("GUIDs content present");
+        assert!(guids.contains("event:/sfx/player/ui_cancel_sfx"));
+        assert!(guids.contains("event:/music/menu_loop_bgm"));
+    }
+}
