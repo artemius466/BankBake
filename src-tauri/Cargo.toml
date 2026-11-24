@@ -1,6 +1,6 @@
 [package]
 name = "bankbake"
-version = "0.1.0"
+version = "1.0.0"
 description = "Lightweight FMOD Bank Compiler & Audio Converter"
 authors = ["BankBake"]
 edition = "2021"

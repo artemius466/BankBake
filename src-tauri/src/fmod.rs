@@ -40,6 +40,8 @@ pub struct AppConfig {
     pub export_guids: bool,
     #[serde(default)]
     pub keep_temp_project: bool,
+    #[serde(default)]
+    pub suppress_update_popup: bool,
     #[serde(default = "default_is_debug_build", skip_deserializing)]
     pub is_debug_build: bool,
 }
@@ -53,6 +55,7 @@ impl Default for AppConfig {
             build_master_banks: true,
             export_guids: true,
             keep_temp_project: false,
+            suppress_update_popup: false,
             is_debug_build: cfg!(debug_assertions),
         }
     }

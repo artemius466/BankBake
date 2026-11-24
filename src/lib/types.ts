@@ -8,7 +8,16 @@ export interface AppConfig {
   buildMasterBanks: boolean;
   exportGuids: boolean;
   keepTempProject: boolean;
+  suppressUpdatePopup?: boolean;
   isDebugBuild?: boolean;
+}
+
+export interface GithubReleaseInfo {
+  tagName: string;
+  version: string;
+  name: string;
+  body: string;
+  htmlUrl: string;
 }
 
 export interface CompilerInfo {

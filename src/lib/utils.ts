@@ -22,3 +22,20 @@ export function formatBytes(bytes: number): string {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
+
+export function cleanVersion(v: string): string {
+  return v.trim().replace(/^[vV]/, "").split("-")[0];
+}
+
+export function isNewerVersion(remoteVer: string, localVer: string): boolean {
+  const rParts = cleanVersion(remoteVer).split(".").map((n) => parseInt(n, 10) || 0);
+  const lParts = cleanVersion(localVer).split(".").map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(rParts.length, lParts.length);
+  for (let i = 0; i < len; i++) {
+    const r = rParts[i] ?? 0;
+    const l = lParts[i] ?? 0;
+    if (r > l) return true;
+    if (r < l) return false;
+  }
+  return false;
+}

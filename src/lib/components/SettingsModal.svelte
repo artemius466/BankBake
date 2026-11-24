@@ -41,8 +41,11 @@
     buildMasterBanks: true,
     exportGuids: true,
     keepTempProject: false,
+    suppressUpdatePopup: false,
   });
 
+  // Only show the suppressUpdatePopup toggle in Settings if it was already ticked on in the update popup
+  let showSuppressUpdateToggle = $state(false);
   let saving = $state(false);
 
   // Show compiler path override if we are in a Debug/Dev build OR if the bundled FMOD files are missing
@@ -61,7 +64,9 @@
         buildMasterBanks: config.buildMasterBanks,
         exportGuids: config.exportGuids,
         keepTempProject: config.keepTempProject,
+        suppressUpdatePopup: Boolean(config.suppressUpdatePopup),
       };
+      showSuppressUpdateToggle = Boolean(config.suppressUpdatePopup);
     }
   });
 
@@ -101,6 +106,7 @@
         buildMasterBanks: draft.buildMasterBanks,
         exportGuids: draft.exportGuids,
         keepTempProject: isDebugBuild ? draft.keepTempProject : false,
+        suppressUpdatePopup: Boolean(draft.suppressUpdatePopup),
         isDebugBuild,
       };
       await onSave(cleaned);
@@ -169,6 +175,21 @@
               label="Export GUIDs.txt"
             />
           </div>
+
+          {#if showSuppressUpdateToggle}
+            <div class="flex items-center justify-between pt-2 border-t border-zinc-800/70">
+              <div>
+                <div class="font-medium text-zinc-200">Hide Update Notifications</div>
+                <div class="text-[11px] text-zinc-500">
+                  Turn off to re-enable new GitHub release update popups on startup
+                </div>
+              </div>
+              <Switch
+                bind:checked={draft.suppressUpdatePopup}
+                label="Hide update notifications"
+              />
+            </div>
+          {/if}
         </div>
 
         <!-- Compiler Override / Debug Section (Shown in Debug Builds OR if Bundled FMOD is missing) -->

@@ -15,30 +15,22 @@ pub struct ConfigState {
 }
 
 fn resolve_config_path() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            // If running from a portable folder (not cargo target), store config right next to exe
-            let dir_str = exe_dir.to_string_lossy();
-            if !dir_str.contains("\\target\\debug") && !dir_str.contains("\\target\\release") {
-                return exe_dir.join("bankbake.config.json");
-            }
-        }
-    }
-    if let Some(proj_dir) = dirs::config_dir() {
-        let dir = proj_dir.join("BankBake");
-        if fs::create_dir_all(&dir).is_ok() {
-            return dir.join("config.json");
-        }
-    }
     if let Ok(cwd) = std::env::current_dir() {
         let root = if cwd.ends_with("src-tauri") {
             cwd.parent().unwrap_or(&cwd).to_path_buf()
         } else {
             cwd
         };
-        return root.join(".bankbake.config.json");
+        if root.join("src-tauri").exists() {
+            return root.join("bankbake.config.json");
+        }
     }
-    PathBuf::from(".bankbake.config.json")
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            return exe_dir.join("bankbake.config.json");
+        }
+    }
+    PathBuf::from("bankbake.config.json")
 }
 
 fn load_config_from_disk(path: &PathBuf) -> AppConfig {

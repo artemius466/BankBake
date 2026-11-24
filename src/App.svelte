@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open } from "@tauri-apps/plugin-dialog";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -11,13 +12,15 @@
     BakeBankRequest,
     BakeBankResult,
     CompilerInfo,
+    GithubReleaseInfo,
   } from "$lib/types";
-  import { formatBytes } from "$lib/utils";
+  import { cleanVersion, formatBytes, isNewerVersion } from "$lib/utils";
   import Button from "$lib/components/ui/button/Button.svelte";
   import Input from "$lib/components/ui/input/Input.svelte";
   import Badge from "$lib/components/ui/badge/Badge.svelte";
   import EventCard from "$lib/components/EventCard.svelte";
   import SettingsModal from "$lib/components/SettingsModal.svelte";
+  import UpdateModal from "$lib/components/UpdateModal.svelte";
   import {
     Flame,
     Settings,
@@ -36,11 +39,16 @@
   } from "lucide-svelte";
 
   // Application State
+  let appVersion = $state("1.0.0");
   let bankName = $state("SoundBank");
   let outputDirInput = $state("./BakedBanks");
   let events = $state<AudioEventCardItem[]>([]);
   let isDragging = $state(false);
   let settingsOpen = $state(false);
+
+  // Auto-Update Popup State
+  let updateModalOpen = $state(false);
+  let latestRelease = $state<GithubReleaseInfo | null>(null);
 
   let config = $state<AppConfig>({
     mode: "standalone",
@@ -49,6 +57,7 @@
     buildMasterBanks: true,
     exportGuids: true,
     keepTempProject: false,
+    suppressUpdatePopup: false,
     isDebugBuild: import.meta.env.DEV,
   });
 
@@ -115,6 +124,61 @@
     });
     outputDirInput = config.outputDirectory ?? "./BakedBanks";
     await refreshCompilerStatus(config.fmodCompilerPath);
+  }
+
+  async function checkForGithubUpdate() {
+    if (config.suppressUpdatePopup) return;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(
+        "https://api.github.com/repos/sashaantipov2012/BankBake/releases/latest",
+        {
+          headers: { Accept: "application/vnd.github+json" },
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timeoutId);
+      if (!res.ok) return;
+
+      const data = await res.json();
+      const rawTag: string = data?.tag_name ?? "";
+      if (!rawTag) return;
+
+      const remoteVer = cleanVersion(rawTag);
+      if (isNewerVersion(remoteVer, appVersion)) {
+        latestRelease = {
+          tagName: rawTag,
+          version: remoteVer,
+          name: data?.name || `BankBake ${rawTag}`,
+          body: data?.body || "",
+          htmlUrl:
+            data?.html_url ||
+            "https://github.com/sashaantipov2012/BankBake/releases",
+        };
+        updateModalOpen = true;
+      }
+    } catch {
+      // Silently ignore any network or offline errors
+    }
+  }
+
+  async function handleDismissUpdateModal(neverShowAgain: boolean) {
+    updateModalOpen = false;
+    if (neverShowAgain && !config.suppressUpdatePopup) {
+      const updated: AppConfig = {
+        ...config,
+        suppressUpdatePopup: true,
+      };
+      config = updated;
+      try {
+        config = await invoke<AppConfig>("save_app_config", {
+          newConfig: updated,
+        });
+      } catch {
+        // ignore persistence error
+      }
+    }
   }
 
   async function persistOutputDirectory(dirValue: string) {
@@ -352,8 +416,16 @@
   }
 
   onMount(async () => {
+    try {
+      const v = await getVersion();
+      if (v) appVersion = cleanVersion(v);
+    } catch {
+      appVersion = "1.0.0";
+    }
+
     await loadConfig();
     await refreshCompilerStatus();
+    checkForGithubUpdate();
 
     // Tauri v2 native window file drag-and-drop listener
     try {
@@ -384,7 +456,7 @@
 </script>
 
 <div class="min-h-screen flex flex-col bg-zinc-950 text-zinc-100">
-  <!-- Simple Header with App Name, Compiler Indicator & Settings Button -->
+  <!-- Simple Header with App Name, Version & FMOD Badges, Compiler Indicator & Settings Button -->
   <header
     class="sticky top-0 z-30 border-b border-zinc-800/80 bg-zinc-950/85 backdrop-blur-md"
   >
@@ -399,10 +471,15 @@
           <Flame class="h-4 w-4 fill-amber-400/25" />
         </div>
         <div>
-          <div class="flex items-center gap-2">
-            <h1 class="text-sm font-semibold tracking-tight text-zinc-100">
+          <div class="flex items-center gap-1.5">
+            <h1 class="text-sm font-semibold tracking-tight text-zinc-100 mr-0.5">
               BankBake
             </h1>
+            <span
+              class="rounded-md bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-amber-400/90"
+            >
+              {appVersion}
+            </span>
             <span
               class="rounded-md bg-zinc-900 border border-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-400"
             >
@@ -804,5 +881,13 @@
     onClose={() => (settingsOpen = false)}
     onSave={handleSaveConfig}
     onRecheckCompiler={refreshCompilerStatus}
+  />
+
+  <!-- Optional GitHub Release Update Popup -->
+  <UpdateModal
+    openModal={updateModalOpen}
+    currentVersion={appVersion}
+    release={latestRelease}
+    onDismiss={handleDismissUpdateModal}
   />
 </div>
