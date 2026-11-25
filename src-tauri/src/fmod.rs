@@ -1,5 +1,10 @@
+use flate2::read::DeflateDecoder;
+use flate2::write::DeflateEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
@@ -38,6 +43,8 @@ pub struct AppConfig {
     pub build_master_banks: bool,
     #[serde(default = "default_true")]
     pub export_guids: bool,
+    #[serde(default = "default_true")]
+    pub export_project_file: bool,
     #[serde(default)]
     pub keep_temp_project: bool,
     #[serde(default)]
@@ -54,6 +61,7 @@ impl Default for AppConfig {
             output_directory: None,
             build_master_banks: true,
             export_guids: true,
+            export_project_file: true,
             keep_temp_project: false,
             suppress_update_popup: false,
             is_debug_build: cfg!(debug_assertions),
@@ -116,6 +124,57 @@ pub struct BakeBankRequest {
     pub fmod_compiler_path: Option<String>,
     pub build_master_banks: Option<bool>,
     pub export_guids: Option<bool>,
+    pub export_project_file: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectEventEntry {
+    pub id: String,
+    pub archive_path: String,
+    pub filename: String,
+    pub event_name: String,
+    pub category: EventCategory,
+    pub looping: bool,
+    pub volume_db: f64,
+    pub custom_loop_enabled: bool,
+    pub loop_start: f64,
+    pub loop_end: Option<f64>,
+    pub duration: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BankBakeProjectManifest {
+    pub format: String,
+    pub version: String,
+    pub bank_name: String,
+    pub events: Vec<ProjectEventEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedProjectEvent {
+    pub id: String,
+    pub file_path: String,
+    pub filename: String,
+    pub event_name: String,
+    pub category: EventCategory,
+    pub looping: bool,
+    pub volume_db: f64,
+    pub custom_loop_enabled: bool,
+    pub loop_start: f64,
+    pub loop_end: Option<f64>,
+    pub duration: f64,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedProjectData {
+    pub bank_name: String,
+    pub project_path: String,
+    pub events: Vec<LoadedProjectEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -810,10 +869,19 @@ pub fn create_temp_fmod_project(project_dir: &Path) -> Result<PathBuf, String> {
 }
 
 fn escape_js_string(s: &str) -> String {
-    s.replace('\\', "/")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push('/'),
+            '"' => out.push_str("\\\""),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            '\u{2028}' | '\u{2029}' => {}
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Parse an event path like `event:/sfx/player/jump`, `/sfx/player/jump`, or `jump`
@@ -1134,9 +1202,36 @@ pub fn execute_bake_bank(request: &BakeBankRequest, config: &AppConfig) -> Resul
     let fspro_path = create_temp_fmod_project(&project_dir)?;
     let build_master = request.build_master_banks.unwrap_or(config.build_master_banks);
     let export_guids = request.export_guids.unwrap_or(config.export_guids);
+    let export_project = request.export_project_file.unwrap_or(config.export_project_file);
     let keep_temp = cfg!(debug_assertions) && config.keep_temp_project;
 
-    let js_code = generate_fmod_bake_script(&bank_name, &request.events, export_guids);
+    // Stage audio files into a clean folder with safe ASCII filenames (`audio_0.ogg`, etc.)
+    // so that special characters, spaces, apostrophes, Unicode, or duplicate filenames
+    // in the user's original paths never trip up FMOD Studio's JS engine or asset importer.
+    let staged_dir = temp_workspace.join("StagedAudio");
+    fs::create_dir_all(&staged_dir)
+        .map_err(|e| format!("Failed to create staged audio directory: {}", e))?;
+
+    let mut staged_events = request.events.clone();
+    for (idx, ev) in staged_events.iter_mut().enumerate() {
+        let src_path = PathBuf::from(&ev.file_path);
+        let ext = src_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("wav")
+            .to_lowercase();
+        let safe_filename = format!("audio_{}.{}", idx, ext);
+        let dst_path = staged_dir.join(&safe_filename);
+        fs::copy(&src_path, &dst_path).map_err(|e| {
+            format!(
+                "Failed to stage audio file '{}' for compilation: {}",
+                ev.filename, e
+            )
+        })?;
+        ev.file_path = dst_path.to_string_lossy().to_string();
+    }
+
+    let js_code = generate_fmod_bake_script(&bank_name, &staged_events, export_guids);
     let script_path = project_dir.join("bake.js");
     fs::write(&script_path, &js_code)
         .map_err(|e| format!("Failed to write bake.js script: {}", e))?;
@@ -1226,6 +1321,19 @@ pub fn execute_bake_bank(request: &BakeBankRequest, config: &AppConfig) -> Resul
         }
     }
 
+    // Export .bankbake project archive (ZIP containing project.json + all audio files) if enabled
+    if export_project {
+        let project_filename = format!("{}.bankbake", bank_name);
+        let project_dst = output_dir.join(&project_filename);
+        if let Ok(project_size) = save_bankbake_project(&bank_name, &request.events, &project_dst) {
+            built_files.push(BuiltFileEntry {
+                filename: project_filename,
+                path: project_dst.to_string_lossy().to_string(),
+                size_bytes: project_size,
+            });
+        }
+    }
+
     if !keep_temp {
         let _ = fs::remove_dir_all(&temp_workspace);
     }
@@ -1249,6 +1357,437 @@ pub fn execute_bake_bank(request: &BakeBankRequest, config: &AppConfig) -> Resul
             if request.events.len() == 1 { "" } else { "s" },
             duration_ms as f64 / 1000.0
         ),
+    })
+}
+
+struct ZipWriteEntry {
+    name: String,
+    crc32: u32,
+    method: u16,
+    compressed_size: u32,
+    uncompressed_size: u32,
+    local_header_offset: u32,
+}
+
+fn sanitize_archive_filename(name: &str) -> String {
+    let forbidden = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if forbidden.contains(&c) || c.is_control() {
+            out.push('_');
+        } else {
+            out.push(c);
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        "audio.wav".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Write a standard ZIP archive containing the given `(entry_name, raw_bytes, compress)` files
+fn write_zip_archive(dest_path: &Path, files: &[(String, Vec<u8>, bool)]) -> Result<u64, String> {
+    if let Some(parent) = dest_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+        }
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut central_entries: Vec<ZipWriteEntry> = Vec::with_capacity(files.len());
+
+    for (name, raw_data, should_compress) in files {
+        let local_header_offset = buf.len() as u32;
+        let crc = crc32fast::hash(raw_data);
+        let uncompressed_size = raw_data.len() as u32;
+
+        let (method, payload): (u16, Vec<u8>) = if *should_compress && !raw_data.is_empty() {
+            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+            if encoder.write_all(raw_data).is_ok() {
+                if let Ok(compressed) = encoder.finish() {
+                    if compressed.len() < raw_data.len() {
+                        (8, compressed)
+                    } else {
+                        (0, raw_data.clone())
+                    }
+                } else {
+                    (0, raw_data.clone())
+                }
+            } else {
+                (0, raw_data.clone())
+            }
+        } else {
+            (0, raw_data.clone())
+        };
+
+        let compressed_size = payload.len() as u32;
+        let name_bytes = name.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        // Bit 11 (0x0800) = UTF-8 filename encoding
+        let flags: u16 = 0x0800;
+
+        // Local file header (30 bytes + filename)
+        buf.extend_from_slice(&0x04034b50u32.to_le_bytes());
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed to extract (2.0)
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.extend_from_slice(&method.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&crc.to_le_bytes());
+        buf.extend_from_slice(&compressed_size.to_le_bytes());
+        buf.extend_from_slice(&uncompressed_size.to_le_bytes());
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra field len
+        buf.extend_from_slice(name_bytes);
+        buf.extend_from_slice(&payload);
+
+        central_entries.push(ZipWriteEntry {
+            name: name.clone(),
+            crc32: crc,
+            method,
+            compressed_size,
+            uncompressed_size,
+            local_header_offset,
+        });
+    }
+
+    let central_dir_offset = buf.len() as u32;
+    for entry in &central_entries {
+        let name_bytes = entry.name.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        let flags: u16 = 0x0800;
+
+        // Central directory file header (46 bytes + filename)
+        buf.extend_from_slice(&0x02014b50u32.to_le_bytes());
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        buf.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.extend_from_slice(&entry.method.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        buf.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        buf.extend_from_slice(&entry.crc32.to_le_bytes());
+        buf.extend_from_slice(&entry.compressed_size.to_le_bytes());
+        buf.extend_from_slice(&entry.uncompressed_size.to_le_bytes());
+        buf.extend_from_slice(&name_len.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        buf.extend_from_slice(&0u16.to_le_bytes()); // internal file attrs
+        buf.extend_from_slice(&0u32.to_le_bytes()); // external file attrs
+        buf.extend_from_slice(&entry.local_header_offset.to_le_bytes());
+        buf.extend_from_slice(name_bytes);
+    }
+
+    let central_dir_size = (buf.len() as u32) - central_dir_offset;
+    let entry_count = central_entries.len() as u16;
+
+    // End of Central Directory Record (22 bytes)
+    buf.extend_from_slice(&0x06054b50u32.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // number of this disk
+    buf.extend_from_slice(&0u16.to_le_bytes()); // disk where central directory starts
+    buf.extend_from_slice(&entry_count.to_le_bytes());
+    buf.extend_from_slice(&entry_count.to_le_bytes());
+    buf.extend_from_slice(&central_dir_size.to_le_bytes());
+    buf.extend_from_slice(&central_dir_offset.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+    fs::write(dest_path, &buf)
+        .map_err(|e| format!("Failed to write .bankbake file {}: {}", dest_path.display(), e))?;
+    Ok(buf.len() as u64)
+}
+
+/// Read all entries from a standard ZIP archive (supporting Stored method 0 and Deflate method 8)
+fn read_zip_archive(zip_path: &Path) -> Result<HashMap<String, Vec<u8>>, String> {
+    let bytes = fs::read(zip_path)
+        .map_err(|e| format!("Failed to read .bankbake file {}: {}", zip_path.display(), e))?;
+
+    if bytes.len() < 22 {
+        return Err("Invalid .bankbake project file (file is too small to be a ZIP archive).".to_string());
+    }
+
+    // Locate End of Central Directory (EOCD) signature 0x06054b50 scanning backwards from end
+    let min_eocd_pos = bytes.len().saturating_sub(65557);
+    let mut eocd_pos: Option<usize> = None;
+    for i in (min_eocd_pos..=bytes.len() - 22).rev() {
+        if &bytes[i..i + 4] == &[0x50, 0x4b, 0x05, 0x06] {
+            eocd_pos = Some(i);
+            break;
+        }
+    }
+
+    let eocd = eocd_pos.ok_or_else(|| {
+        "Invalid .bankbake project file (End of Central Directory not found).".to_string()
+    })?;
+
+    let entry_count = u16::from_le_bytes([bytes[eocd + 10], bytes[eocd + 11]]) as usize;
+    let cd_offset = u32::from_le_bytes([
+        bytes[eocd + 16],
+        bytes[eocd + 17],
+        bytes[eocd + 18],
+        bytes[eocd + 19],
+    ]) as usize;
+
+    let mut entries = HashMap::with_capacity(entry_count);
+    let mut pos = cd_offset;
+
+    for _ in 0..entry_count {
+        if pos + 46 > bytes.len() || &bytes[pos..pos + 4] != &[0x50, 0x4b, 0x01, 0x02] {
+            return Err("Corrupted Central Directory in .bankbake project archive.".to_string());
+        }
+        let method = u16::from_le_bytes([bytes[pos + 10], bytes[pos + 11]]);
+        let compressed_size = u32::from_le_bytes([
+            bytes[pos + 20],
+            bytes[pos + 21],
+            bytes[pos + 22],
+            bytes[pos + 23],
+        ]) as usize;
+        let uncompressed_size = u32::from_le_bytes([
+            bytes[pos + 24],
+            bytes[pos + 25],
+            bytes[pos + 26],
+            bytes[pos + 27],
+        ]) as usize;
+        let name_len = u16::from_le_bytes([bytes[pos + 28], bytes[pos + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([bytes[pos + 30], bytes[pos + 31]]) as usize;
+        let comment_len = u16::from_le_bytes([bytes[pos + 32], bytes[pos + 33]]) as usize;
+        let local_header_offset = u32::from_le_bytes([
+            bytes[pos + 42],
+            bytes[pos + 43],
+            bytes[pos + 44],
+            bytes[pos + 45],
+        ]) as usize;
+
+        if pos + 46 + name_len > bytes.len() {
+            return Err("Corrupted entry filename in .bankbake project archive.".to_string());
+        }
+        let name = String::from_utf8_lossy(&bytes[pos + 46..pos + 46 + name_len])
+            .replace('\\', "/");
+
+        pos += 46 + name_len + extra_len + comment_len;
+
+        // Skip directory entries
+        if name.ends_with('/') {
+            continue;
+        }
+
+        if local_header_offset + 30 > bytes.len()
+            || &bytes[local_header_offset..local_header_offset + 4] != &[0x50, 0x4b, 0x03, 0x04]
+        {
+            return Err(format!(
+                "Corrupted Local File Header for '{}' in .bankbake archive.",
+                name
+            ));
+        }
+
+        let local_name_len = u16::from_le_bytes([
+            bytes[local_header_offset + 26],
+            bytes[local_header_offset + 27],
+        ]) as usize;
+        let local_extra_len = u16::from_le_bytes([
+            bytes[local_header_offset + 28],
+            bytes[local_header_offset + 29],
+        ]) as usize;
+
+        let data_start = local_header_offset + 30 + local_name_len + local_extra_len;
+        let data_end = data_start + compressed_size;
+        if data_end > bytes.len() {
+            return Err(format!(
+                "Truncated data stream for '{}' in .bankbake archive.",
+                name
+            ));
+        }
+
+        let raw_slice = &bytes[data_start..data_end];
+        let decoded = match method {
+            0 => raw_slice.to_vec(),
+            8 => {
+                let mut decoder = DeflateDecoder::new(raw_slice);
+                let mut out = Vec::with_capacity(uncompressed_size);
+                decoder.read_to_end(&mut out).map_err(|e| {
+                    format!("Failed to decompress '{}' from .bankbake archive: {}", name, e)
+                })?;
+                out
+            }
+            other => {
+                return Err(format!(
+                    "Unsupported ZIP compression method {} for '{}' in .bankbake archive.",
+                    other, name
+                ));
+            }
+        };
+
+        entries.insert(name, decoded);
+    }
+
+    Ok(entries)
+}
+
+/// Save a `.bankbake` project file (ZIP archive containing `project.json` and all audio files under `assets/`)
+pub fn save_bankbake_project(
+    bank_name: &str,
+    events: &[BakeEventItem],
+    dest_path: &Path,
+) -> Result<u64, String> {
+    let clean_bank_name = sanitize_bank_name(bank_name)?;
+    let mut project_events: Vec<ProjectEventEntry> = Vec::with_capacity(events.len());
+    let mut zip_files: Vec<(String, Vec<u8>, bool)> = Vec::with_capacity(events.len() + 1);
+
+    for (idx, ev) in events.iter().enumerate() {
+        let src_path = PathBuf::from(&ev.file_path);
+        if !src_path.exists() || !src_path.is_file() {
+            return Err(format!("Audio file not found: {}", ev.file_path));
+        }
+        let audio_bytes = fs::read(&src_path).map_err(|e| {
+            format!(
+                "Failed to read audio file '{}' for project archive: {}",
+                ev.filename, e
+            )
+        })?;
+
+        let raw_filename = if !ev.filename.trim().is_empty() {
+            ev.filename.clone()
+        } else {
+            src_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("audio.wav")
+                .to_string()
+        };
+        let safe_name = sanitize_archive_filename(&raw_filename);
+        let archive_path = format!("assets/{}_{}", idx, safe_name);
+
+        let ext = src_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        // Compress uncompressed PCM formats (wav, aif, aiff), store already-compressed formats (ogg, mp3, flac, wma)
+        let should_compress = matches!(ext.as_str(), "wav" | "aif" | "aiff");
+
+        project_events.push(ProjectEventEntry {
+            id: ev.id.clone(),
+            archive_path: archive_path.clone(),
+            filename: raw_filename,
+            event_name: ev.event_name.clone(),
+            category: ev.category.clone(),
+            looping: ev.looping,
+            volume_db: ev.volume_db,
+            custom_loop_enabled: ev.custom_loop_enabled,
+            loop_start: ev.loop_start,
+            loop_end: ev.loop_end,
+            duration: ev.duration,
+        });
+
+        zip_files.push((archive_path, audio_bytes, should_compress));
+    }
+
+    let manifest = BankBakeProjectManifest {
+        format: "bankbake-project".to_string(),
+        version: "1.0.0".to_string(),
+        bank_name: clean_bank_name,
+        events: project_events,
+    };
+
+    let manifest_json = serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+
+    // Put project.json first in the ZIP archive
+    let mut ordered_files = Vec::with_capacity(zip_files.len() + 1);
+    ordered_files.push(("project.json".to_string(), manifest_json, true));
+    ordered_files.extend(zip_files);
+
+    write_zip_archive(dest_path, &ordered_files)
+}
+
+/// Load a `.bankbake` project file, extracting embedded audio files to a session workspace directory
+pub fn load_bankbake_project(project_path: &Path) -> Result<LoadedProjectData, String> {
+    if !project_path.exists() || !project_path.is_file() {
+        return Err(format!(
+            "Project file does not exist: {}",
+            project_path.display()
+        ));
+    }
+
+    let mut entries = read_zip_archive(project_path)?;
+    let manifest_bytes = entries.remove("project.json").ok_or_else(|| {
+        "Invalid .bankbake file: missing 'project.json' manifest inside archive.".to_string()
+    })?;
+
+    let manifest: BankBakeProjectManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("Failed to parse 'project.json' inside .bankbake archive: {}", e))?;
+
+    let session_id = Uuid::new_v4().to_string();
+    let primary_extract_dir = std::env::temp_dir()
+        .join("BankBakeProjects")
+        .join(&session_id);
+
+    let extract_dir = if fs::create_dir_all(&primary_extract_dir).is_ok() {
+        primary_extract_dir
+    } else {
+        let fallback = project_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(".bankbake_cache")
+            .join(&session_id);
+        fs::create_dir_all(&fallback)
+            .map_err(|e| format!("Failed to create project extraction cache directory: {}", e))?;
+        fallback
+    };
+
+    let mut loaded_events = Vec::with_capacity(manifest.events.len());
+
+    for (idx, ev) in manifest.events.into_iter().enumerate() {
+        let normalized_key = ev.archive_path.replace('\\', "/");
+        let audio_bytes = entries.remove(&normalized_key).ok_or_else(|| {
+            format!(
+                "Missing embedded audio asset '{}' in .bankbake project file.",
+                ev.archive_path
+            )
+        })?;
+
+        let safe_name = sanitize_archive_filename(&ev.filename);
+        let extracted_file_path = extract_dir.join(format!("{}_{}", idx, safe_name));
+        fs::write(&extracted_file_path, &audio_bytes).map_err(|e| {
+            format!(
+                "Failed to extract audio asset '{}' from project file: {}",
+                ev.filename, e
+            )
+        })?;
+
+        let size_bytes = audio_bytes.len() as u64;
+        let duration = if ev.duration > 0.0 {
+            ev.duration
+        } else {
+            probe_audio_duration(&extracted_file_path).unwrap_or(0.0)
+        };
+
+        loaded_events.push(LoadedProjectEvent {
+            id: if ev.id.trim().is_empty() {
+                Uuid::new_v4().to_string()
+            } else {
+                ev.id
+            },
+            file_path: extracted_file_path.to_string_lossy().to_string(),
+            filename: ev.filename,
+            event_name: ev.event_name,
+            category: ev.category,
+            looping: ev.looping,
+            volume_db: ev.volume_db,
+            custom_loop_enabled: ev.custom_loop_enabled,
+            loop_start: ev.loop_start,
+            loop_end: ev.loop_end,
+            duration,
+            size_bytes,
+        });
+    }
+
+    Ok(LoadedProjectData {
+        bank_name: manifest.bank_name,
+        project_path: project_path.to_string_lossy().to_string(),
+        events: loaded_events,
     })
 }
 
@@ -1310,6 +1849,7 @@ mod tests {
             fmod_compiler_path: info.path.clone(),
             build_master_banks: Some(true),
             export_guids: Some(true),
+            export_project_file: Some(true),
         };
 
         let mut cfg = AppConfig::default();
@@ -1321,6 +1861,19 @@ mod tests {
         assert!(out_dir.join("Master.bank").exists());
         assert!(out_dir.join("Master.strings.bank").exists());
         assert!(out_dir.join("GUIDs.txt").exists());
+        let project_file = out_dir.join("RustTestBank.bankbake");
+        assert!(project_file.exists(), "Expected RustTestBank.bankbake project file to be generated");
+
+        let loaded_project = load_bankbake_project(&project_file)
+            .expect("Expected generated .bankbake project file to load cleanly");
+        assert_eq!(loaded_project.bank_name, "RustTestBank");
+        assert_eq!(loaded_project.events.len(), 2);
+        assert_eq!(loaded_project.events[0].event_name, "event:/sfx/player/ui_cancel_sfx");
+        assert_eq!(loaded_project.events[1].event_name, "event:/music/menu_loop_bgm");
+        assert!(loaded_project.events[1].looping);
+        assert!(loaded_project.events[1].custom_loop_enabled);
+        assert!(PathBuf::from(&loaded_project.events[0].file_path).exists());
+
         let guids = result.guids_content.expect("GUIDs content present");
         assert!(guids.contains("event:/sfx/player/ui_cancel_sfx"));
         assert!(guids.contains("event:/music/menu_loop_bgm"));

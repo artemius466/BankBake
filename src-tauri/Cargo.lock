@@ -218,7 +218,9 @@ name = "bankbake"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "dirs",
+ "flate2",
  "serde",
  "serde_json",
  "tauri",

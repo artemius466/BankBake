@@ -7,6 +7,7 @@ export interface AppConfig {
   outputDirectory: string | null;
   buildMasterBanks: boolean;
   exportGuids: boolean;
+  exportProjectFile: boolean;
   keepTempProject: boolean;
   suppressUpdatePopup?: boolean;
   isDebugBuild?: boolean;
@@ -78,6 +79,28 @@ export interface BakeBankRequest {
   fmodCompilerPath?: string | null;
   buildMasterBanks?: boolean;
   exportGuids?: boolean;
+  exportProjectFile?: boolean;
+}
+
+export interface LoadedProjectEvent {
+  id: string;
+  filePath: string;
+  filename: string;
+  eventName: string;
+  category: EventCategory;
+  looping: boolean;
+  volumeDb: number;
+  customLoopEnabled: boolean;
+  loopStart: number;
+  loopEnd: number | null;
+  duration: number;
+  sizeBytes: number;
+}
+
+export interface LoadedProjectData {
+  bankName: string;
+  projectPath: string;
+  events: LoadedProjectEvent[];
 }
 
 export interface BuiltFileEntry {

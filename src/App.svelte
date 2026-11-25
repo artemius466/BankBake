@@ -3,7 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open, save } from "@tauri-apps/plugin-dialog";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import type {
     AppConfig,
@@ -11,8 +11,10 @@
     AudioFileInfo,
     BakeBankRequest,
     BakeBankResult,
+    BakeEventItemPayload,
     CompilerInfo,
     GithubReleaseInfo,
+    LoadedProjectData,
   } from "$lib/types";
   import { cleanVersion, formatBytes, isNewerVersion } from "$lib/utils";
   import Button from "$lib/components/ui/button/Button.svelte";
@@ -36,10 +38,12 @@
     ChevronUp,
     FileCode2,
     Disc3,
+    FileArchive,
+    Download,
   } from "lucide-svelte";
 
   // Application State
-  let appVersion = $state("1.0.0");
+  let appVersion = $state("1.1.0");
   let bankName = $state("SoundBank");
   let outputDirInput = $state("./BakedBanks");
   let events = $state<AudioEventCardItem[]>([]);
@@ -56,6 +60,7 @@
     outputDirectory: null,
     buildMasterBanks: true,
     exportGuids: true,
+    exportProjectFile: true,
     keepTempProject: false,
     suppressUpdatePopup: false,
     isDebugBuild: import.meta.env.DEV,
@@ -236,9 +241,24 @@
   async function addAudioPaths(paths: string[]) {
     if (!paths || paths.length === 0) return;
     buildError = null;
+
+    // Check if any dropped/selected path is a .bankbake project file
+    const projectPath = paths.find((p) =>
+      p.toLowerCase().trim().endsWith(".bankbake")
+    );
+    const audioPaths = paths.filter(
+      (p) => !p.toLowerCase().trim().endsWith(".bankbake")
+    );
+
+    if (projectPath) {
+      await loadProjectFromPath(projectPath);
+    }
+
+    if (audioPaths.length === 0) return;
+
     try {
       const inspected = await invoke<AudioFileInfo[]>("inspect_audio_files", {
-        paths,
+        paths: audioPaths,
       });
 
       const existingPaths = new Set(events.map((e) => e.filePath.toLowerCase()));
@@ -290,6 +310,116 @@
     }
   }
 
+  async function loadProjectFromPath(projectPath: string) {
+    buildError = null;
+    try {
+      const loaded = await invoke<LoadedProjectData>("load_project_file", {
+        path: projectPath,
+      });
+      bankName = loaded.bankName || "SoundBank";
+      events = loaded.events.map((ev) => ({
+        id: ev.id || crypto.randomUUID(),
+        filePath: ev.filePath,
+        filename: ev.filename,
+        eventName: ev.eventName,
+        category: ev.category,
+        looping: ev.looping,
+        volumeDb: ev.volumeDb,
+        customLoopEnabled: ev.customLoopEnabled,
+        loopStart: ev.loopStart,
+        loopEnd: ev.loopEnd,
+        duration: ev.duration,
+        sizeBytes: ev.sizeBytes,
+        showWaveform: false,
+        showAdvanced: false,
+      }));
+      if (buildStatus !== "baking") {
+        buildStatus = "idle";
+      }
+    } catch (e: any) {
+      buildStatus = "error";
+      buildError =
+        typeof e === "string"
+          ? e
+          : e?.message ?? "Failed to open .bankbake project file.";
+    }
+  }
+
+  async function browseOpenProject() {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "BankBake Project",
+            extensions: ["bankbake"],
+          },
+        ],
+      });
+      if (!selected || typeof selected !== "string") return;
+      await loadProjectFromPath(selected);
+    } catch {
+      // dialog cancelled
+    }
+  }
+
+  function buildEventPayloads(): BakeEventItemPayload[] {
+    return events.map((e) => ({
+      id: e.id,
+      filePath: e.filePath,
+      filename: e.filename,
+      eventName:
+        e.eventName.trim() ||
+        (e.category === "MUSIC"
+          ? "event:/music/unnamed_event"
+          : "event:/sfx/unnamed_event"),
+      category: e.category,
+      looping: e.looping,
+      volumeDb: Number(e.volumeDb) || 0,
+      customLoopEnabled: e.customLoopEnabled,
+      loopStart: Number(e.loopStart) || 0,
+      loopEnd:
+        e.loopEnd !== null && e.loopEnd !== undefined && Number(e.loopEnd) > 0
+          ? Number(e.loopEnd)
+          : null,
+      duration: Number(e.duration) || 1.0,
+    }));
+  }
+
+  async function handleSaveProject() {
+    const trimmedBank = bankName.trim() || "SoundBank";
+    if (events.length === 0) {
+      buildStatus = "error";
+      buildError = "Add at least one audio event before saving a project file.";
+      return;
+    }
+    try {
+      const destinationPath = await save({
+        defaultPath: `${trimmedBank}.bankbake`,
+        filters: [
+          {
+            name: "BankBake Project",
+            extensions: ["bankbake"],
+          },
+        ],
+      });
+      if (!destinationPath) return;
+      buildError = null;
+      await invoke<string>("save_project_file", {
+        bankName: trimmedBank,
+        events: buildEventPayloads(),
+        destinationPath,
+      });
+    } catch (e: any) {
+      buildStatus = "error";
+      buildError =
+        typeof e === "string"
+          ? e
+          : e?.message ?? "Failed to save .bankbake project file.";
+    }
+  }
+
   async function browseAudioFiles() {
     try {
       const selected = await open({
@@ -297,8 +427,25 @@
         directory: false,
         filters: [
           {
+            name: "Audio & BankBake Projects",
+            extensions: [
+              "wav",
+              "ogg",
+              "mp3",
+              "flac",
+              "aif",
+              "aiff",
+              "wma",
+              "bankbake",
+            ],
+          },
+          {
             name: "Audio Files",
             extensions: ["wav", "ogg", "mp3", "flac", "aif", "aiff", "wma"],
+          },
+          {
+            name: "BankBake Project",
+            extensions: ["bankbake"],
           },
         ],
       });
@@ -365,30 +512,12 @@
     const payload: BakeBankRequest = {
       bankName: trimmedBank,
       mode: "standalone",
-      events: events.map((e) => ({
-        id: e.id,
-        filePath: e.filePath,
-        filename: e.filename,
-        eventName:
-          e.eventName.trim() ||
-          (e.category === "MUSIC"
-            ? "event:/music/unnamed_event"
-            : "event:/sfx/unnamed_event"),
-        category: e.category,
-        looping: e.looping,
-        volumeDb: Number(e.volumeDb) || 0,
-        customLoopEnabled: e.customLoopEnabled,
-        loopStart: Number(e.loopStart) || 0,
-        loopEnd:
-          e.loopEnd !== null && e.loopEnd !== undefined && Number(e.loopEnd) > 0
-            ? Number(e.loopEnd)
-            : null,
-        duration: Number(e.duration) || 1.0,
-      })),
+      events: buildEventPayloads(),
       outputDirectory: trimmedOutDir !== "" ? trimmedOutDir : null,
       fmodCompilerPath: config.fmodCompilerPath,
       buildMasterBanks: config.buildMasterBanks,
       exportGuids: config.exportGuids,
+      exportProjectFile: config.exportProjectFile ?? true,
     };
 
     try {
@@ -420,7 +549,7 @@
       const v = await getVersion();
       if (v) appVersion = cleanVersion(v);
     } catch {
-      appVersion = "1.0.0";
+      appVersion = "1.1.0";
     }
 
     await loadConfig();
@@ -489,8 +618,34 @@
         </div>
       </div>
 
-      <!-- Right Controls: Compiler Availability Indicator (Debug or when Missing) + Settings Button -->
-      <div class="flex items-center gap-2.5">
+      <!-- Right Controls: Open/Save Project + Compiler Indicator + Settings Button -->
+      <div class="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          class="h-8 px-2.5 text-xs"
+          title="Open a .bankbake project archive"
+          onclick={browseOpenProject}
+        >
+          <FileArchive class="h-3.5 w-3.5 text-amber-400" />
+          Open Project
+        </Button>
+
+        {#if events.length > 0}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            class="h-8 px-2.5 text-xs"
+            title="Save a portable .bankbake project archive with all audio assets"
+            onclick={handleSaveProject}
+          >
+            <Download class="h-3.5 w-3.5 text-amber-400" />
+            Save Project
+          </Button>
+        {/if}
+
         {#if isDebugBuild || !compilerInfo.available}
           <button
             type="button"
@@ -610,10 +765,10 @@
           </div>
           <div class="space-y-1">
             <p class="text-sm font-medium text-zinc-200">
-              Drag & drop audio files here to create FMOD events
+              Drag & drop audio files or a <code class="text-amber-400">.bankbake</code> project here
             </p>
             <p class="text-xs text-zinc-500">
-              Supports WAV, OGG, MP3, FLAC, AIFF and WMA • Auto-assigns <code class="text-zinc-400">event:/sfx/</code> or <code class="text-zinc-400">event:/music/</code> paths
+              Supports WAV, OGG, MP3, FLAC, AIFF, WMA and <code class="text-zinc-400">.bankbake</code> archives • Auto-assigns <code class="text-zinc-400">event:/sfx/</code> or <code class="text-zinc-400">event:/music/</code> paths
             </p>
           </div>
           <div class="flex flex-wrap items-center justify-center gap-2.5 pt-1">
@@ -626,6 +781,16 @@
             >
               <FolderPlus class="h-3.5 w-3.5" />
               Select Audio Files
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-8 px-3"
+              onclick={browseOpenProject}
+            >
+              <FileArchive class="h-3.5 w-3.5 text-amber-400" />
+              Open .bankbake Project
             </Button>
             <Button
               type="button"

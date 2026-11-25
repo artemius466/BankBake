@@ -5,10 +5,10 @@ BankBake is a lightweight desktop tool that compiles audio files directly into F
 ## Usage
 
 1. Set a **Bank Name** and **Output Folder**.
-2. Drag and drop audio files (`.wav`, `.ogg`, `.mp3`, `.flac`, `.aiff`, `.wma`) into the window.
+2. Drag and drop audio files (`.wav`, `.ogg`, `.mp3`, `.flac`, `.aiff`, `.wma`) or an existing `.bankbake` project file into the window.
 3. Edit the event path (e.g. `event:/sfx/player/jump` or `event:/music/level1`), pick **SFX** or **Music**, and toggle **Loop** if needed.
 4. *(Optional)* Open **Advanced** on any track to adjust volume (dB) or set custom loop start/end points.
-5. Click **Bake Bank** to generate `<BankName>.bank`, `Master.bank`, `Master.strings.bank`, and `GUIDs.txt`.
+5. Click **Bake Bank** to generate `<BankName>.bank`, `Master.bank`, `Master.strings.bank`, `GUIDs.txt`, and an editable `<BankName>.bankbake` project archive containing all audio assets and settings.
 
 ## Building from Source
 

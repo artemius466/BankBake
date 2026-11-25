@@ -1,8 +1,9 @@
 pub mod fmod;
 
 use fmod::{
-    discover_compiler, execute_bake_bank, inspect_audio_file, AppConfig, AudioFileInfo,
-    BakeBankRequest, BakeBankResult, CompilerInfo,
+    discover_compiler, execute_bake_bank, inspect_audio_file, load_bankbake_project,
+    save_bankbake_project, AppConfig, AudioFileInfo, BakeBankRequest, BakeBankResult,
+    BakeEventItem, CompilerInfo, LoadedProjectData,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -163,6 +164,31 @@ async fn bake_bank(
 }
 
 #[tauri::command]
+async fn save_project_file(
+    bank_name: String,
+    events: Vec<BakeEventItem>,
+    destination_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dest = PathBuf::from(&destination_path);
+        save_bankbake_project(&bank_name, &events, &dest)?;
+        Ok(dest.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[tauri::command]
+async fn load_project_file(path: String) -> Result<LoadedProjectData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = PathBuf::from(&path);
+        load_bankbake_project(&p)
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[tauri::command]
 fn list_sample_audio_files() -> Result<Vec<AudioFileInfo>, String> {
     let mut samples = Vec::new();
     let mut roots = Vec::new();
@@ -222,6 +248,8 @@ pub fn run() {
             inspect_audio_files,
             read_audio_bytes,
             bake_bank,
+            save_project_file,
+            load_project_file,
             list_sample_audio_files
         ])
         .run(tauri::generate_context!())

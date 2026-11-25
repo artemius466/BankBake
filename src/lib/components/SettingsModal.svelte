@@ -40,6 +40,7 @@
     outputDirectory: null,
     buildMasterBanks: true,
     exportGuids: true,
+    exportProjectFile: true,
     keepTempProject: false,
     suppressUpdatePopup: false,
   });
@@ -63,6 +64,7 @@
         outputDirectory: config.outputDirectory ?? null,
         buildMasterBanks: config.buildMasterBanks,
         exportGuids: config.exportGuids,
+        exportProjectFile: config.exportProjectFile ?? true,
         keepTempProject: config.keepTempProject,
         suppressUpdatePopup: Boolean(config.suppressUpdatePopup),
       };
@@ -105,6 +107,7 @@
         outputDirectory: config.outputDirectory,
         buildMasterBanks: draft.buildMasterBanks,
         exportGuids: draft.exportGuids,
+        exportProjectFile: draft.exportProjectFile,
         keepTempProject: isDebugBuild ? draft.keepTempProject : false,
         suppressUpdatePopup: Boolean(draft.suppressUpdatePopup),
         isDebugBuild,
@@ -173,6 +176,19 @@
             <Switch
               bind:checked={draft.exportGuids}
               label="Export GUIDs.txt"
+            />
+          </div>
+
+          <div class="flex items-center justify-between">
+            <div>
+              <div class="font-medium text-zinc-200">Generate .bankbake Project File</div>
+              <div class="text-[11px] text-zinc-500">
+                Also save a <code class="text-zinc-400">&lt;BankName&gt;.bankbake</code> project archive with all audio assets when baking
+              </div>
+            </div>
+            <Switch
+              bind:checked={draft.exportProjectFile}
+              label="Generate .bankbake project file"
             />
           </div>
 
