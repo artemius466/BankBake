@@ -35,6 +35,14 @@ Each sound has an event path, which is the name your game or mod uses to find it
 
 Requires [Rust](https://rustup.rs/), [Node.js](https://nodejs.org/), and `pnpm`.
 
+On CachyOS and other Arch-based distributions, install the desktop build tools with the command below. The `rust` package includes Cargo. For other Linux distributions, follow the system dependency instructions. [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/#system-dependencies)
+
+```sh
+sudo pacman -S --needed rust nodejs pnpm base-devel webkit2gtk-4.1 librsvg
+```
+
+Run these commands from the BankBake folder.
+
 ```sh
 # Install dependencies
 pnpm install --frozen-lockfile
@@ -44,8 +52,6 @@ pnpm tauri dev
 ```
 
 ### Linux compiler setup
-
-Install the Tauri system dependencies for your distribution. On Arch-based systems the desktop build uses `base-devel` and `webkit2gtk-4.1`. [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/#system-dependencies)
 
 BankBake supports two compiler setups on Linux.
 
