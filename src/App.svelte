@@ -138,7 +138,7 @@
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 6000);
       const res = await fetch(
-        "https://api.github.com/repos/sashaantipov2012/BankBake/releases/latest",
+        "https://api.github.com/repos/sashaantipov2012/BankBake/releases",
         {
           headers: { Accept: "application/vnd.github+json" },
           signal: controller.signal,
@@ -148,19 +148,46 @@
       if (!res.ok) return;
 
       const data = await res.json();
-      const rawTag: string = data?.tag_name ?? "";
-      if (!rawTag) return;
+      const items: any[] = Array.isArray(data) ? data : data ? [data] : [];
 
-      const remoteVer = cleanVersion(rawTag);
-      if (isNewerVersion(remoteVer, appVersion)) {
+      const newerReleases = items
+        .filter((item) => !item?.draft && !item?.prerelease && item?.tag_name)
+        .map((item) => {
+          const rawTag: string = item.tag_name;
+          const ver = cleanVersion(rawTag);
+          return {
+            tagName: rawTag,
+            version: ver,
+            name: item?.name || `BankBake ${rawTag}`,
+            body: typeof item?.body === "string" ? item.body.trim() : "",
+            htmlUrl:
+              item?.html_url ||
+              "https://github.com/sashaantipov2012/BankBake/releases",
+          };
+        })
+        .filter((r) => isNewerVersion(r.version, appVersion))
+        .sort((a, b) =>
+          isNewerVersion(a.version, b.version)
+            ? -1
+            : isNewerVersion(b.version, a.version)
+              ? 1
+              : 0
+        );
+
+      if (newerReleases.length > 0) {
+        const top = newerReleases[0];
         latestRelease = {
-          tagName: rawTag,
-          version: remoteVer,
-          name: data?.name || `BankBake ${rawTag}`,
-          body: data?.body || "",
-          htmlUrl:
-            data?.html_url ||
-            "https://github.com/sashaantipov2012/BankBake/releases",
+          tagName: top.tagName,
+          version: top.version,
+          name: top.name,
+          body: top.body,
+          htmlUrl: top.htmlUrl,
+          missedReleases: newerReleases.map((r) => ({
+            tagName: r.tagName,
+            version: r.version,
+            name: r.name,
+            body: r.body,
+          })),
         };
         updateModalOpen = true;
       }

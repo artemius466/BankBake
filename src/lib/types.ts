@@ -13,12 +13,20 @@ export interface AppConfig {
   isDebugBuild?: boolean;
 }
 
+export interface GithubReleaseNoteEntry {
+  tagName: string;
+  version: string;
+  name: string;
+  body: string;
+}
+
 export interface GithubReleaseInfo {
   tagName: string;
   version: string;
   name: string;
   body: string;
   htmlUrl: string;
+  missedReleases?: GithubReleaseNoteEntry[];
 }
 
 export interface CompilerInfo {

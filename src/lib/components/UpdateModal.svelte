@@ -81,7 +81,35 @@
           </div>
         </div>
 
-        {#if release.body && release.body.trim() !== ""}
+        {#if release.missedReleases && release.missedReleases.some((r) => r.body && r.body.trim() !== "")}
+          <div class="space-y-1">
+            <div class="flex items-center justify-between text-[11px] font-medium text-zinc-400">
+              <span>Release Notes</span>
+              {#if release.missedReleases.length > 1}
+                <span class="text-[10px] font-mono text-amber-400/90">
+                  {release.missedReleases.length} newer releases
+                </span>
+              {/if}
+            </div>
+            <div
+              class="max-h-48 overflow-y-auto rounded-lg border border-zinc-800/80 bg-zinc-950/50 p-2.5 text-[11px] text-zinc-300 space-y-3"
+            >
+              {#each release.missedReleases as item (item.tagName)}
+                {#if item.body && item.body.trim() !== ""}
+                  <div class="space-y-1 not-first:pt-2.5 not-first:border-t not-first:border-zinc-800/80">
+                    <div class="flex items-center gap-1.5 font-mono text-[11px] font-semibold text-amber-400">
+                      <span>v{item.version}</span>
+                      {#if item.name && item.name !== item.tagName && item.name !== `v${item.version}`}
+                        <span class="text-zinc-500 font-sans font-normal">• {item.name}</span>
+                      {/if}
+                    </div>
+                    <div class="whitespace-pre-wrap text-zinc-300 leading-relaxed">{item.body.trim()}</div>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          </div>
+        {:else if release.body && release.body.trim() !== ""}
           <div class="space-y-1">
             <div class="text-[11px] font-medium text-zinc-400">Release Notes</div>
             <div
