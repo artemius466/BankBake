@@ -21,7 +21,7 @@ pnpm install
 # Run in development mode
 pnpm tauri dev
 
-# Build portable release (outputs to release/BankBake-Portable-win-x64.zip)
+# Build portable release (outputs to release/BankBake-Portable-v<version>-win-x64.zip)
 pnpm portable
 ```
 

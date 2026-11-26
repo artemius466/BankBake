@@ -43,7 +43,7 @@
   } from "lucide-svelte";
 
   // Application State
-  let appVersion = $state("1.1.1");
+  let appVersion = $state("1.1.2");
   let bankName = $state("SoundBank");
   let masterBankName = $state("Master");
   let outputDirInput = $state("./BakedBanks");
@@ -555,7 +555,7 @@
       const v = await getVersion();
       if (v) appVersion = cleanVersion(v);
     } catch {
-      appVersion = "1.1.1";
+      appVersion = "1.1.2";
     }
 
     await loadConfig();

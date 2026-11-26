@@ -3,10 +3,18 @@ import path from "path";
 import { execSync } from "child_process";
 
 const rootDir = process.cwd();
-const releaseOutDir = path.join(rootDir, "release", "BankBake");
-const zipOutPath = path.join(rootDir, "release", "BankBake-Portable-win-x64.zip");
+const pkgJson = JSON.parse(
+  fs.readFileSync(path.join(rootDir, "package.json"), "utf8")
+);
+const version = pkgJson.version || "1.0.0";
+const releaseOutDir = path.join(rootDir, "release", `BankBake-v${version}`);
+const zipOutPath = path.join(
+  rootDir,
+  "release",
+  `BankBake-Portable-v${version}-win-x64.zip`
+);
 
-console.log("=== Building BankBake Portable Release ===");
+console.log(`=== Building BankBake v${version} Portable Release ===`);
 execSync("pnpm tauri build --no-bundle", { stdio: "inherit" });
 
 // Locate built bankbake.exe
