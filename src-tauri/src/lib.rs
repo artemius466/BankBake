@@ -166,12 +166,13 @@ async fn bake_bank(
 #[tauri::command]
 async fn save_project_file(
     bank_name: String,
+    master_bank_name: Option<String>,
     events: Vec<BakeEventItem>,
     destination_path: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let dest = PathBuf::from(&destination_path);
-        save_bankbake_project(&bank_name, &events, &dest)?;
+        save_bankbake_project(&bank_name, master_bank_name.as_deref(), &events, &dest)?;
         Ok(dest.to_string_lossy().to_string())
     })
     .await

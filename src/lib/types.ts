@@ -73,6 +73,7 @@ export interface BakeEventItemPayload {
 
 export interface BakeBankRequest {
   bankName: string;
+  masterBankName?: string | null;
   events: BakeEventItemPayload[];
   mode?: BakeMode;
   outputDirectory?: string | null;
@@ -99,6 +100,7 @@ export interface LoadedProjectEvent {
 
 export interface LoadedProjectData {
   bankName: string;
+  masterBankName?: string;
   projectPath: string;
   events: LoadedProjectEvent[];
 }

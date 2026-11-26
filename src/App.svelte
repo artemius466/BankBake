@@ -43,8 +43,9 @@
   } from "lucide-svelte";
 
   // Application State
-  let appVersion = $state("1.1.0");
+  let appVersion = $state("1.1.1");
   let bankName = $state("SoundBank");
+  let masterBankName = $state("Master");
   let outputDirInput = $state("./BakedBanks");
   let events = $state<AudioEventCardItem[]>([]);
   let isDragging = $state(false);
@@ -317,6 +318,7 @@
         path: projectPath,
       });
       bankName = loaded.bankName || "SoundBank";
+      masterBankName = loaded.masterBankName || "Master";
       events = loaded.events.map((ev) => ({
         id: ev.id || crypto.randomUUID(),
         filePath: ev.filePath,
@@ -389,6 +391,7 @@
 
   async function handleSaveProject() {
     const trimmedBank = bankName.trim() || "SoundBank";
+    const trimmedMaster = masterBankName.trim() || "Master";
     if (events.length === 0) {
       buildStatus = "error";
       buildError = "Add at least one audio event before saving a project file.";
@@ -408,6 +411,7 @@
       buildError = null;
       await invoke<string>("save_project_file", {
         bankName: trimmedBank,
+        masterBankName: trimmedMaster,
         events: buildEventPayloads(),
         destinationPath,
       });
@@ -509,8 +513,10 @@
       await persistOutputDirectory(trimmedOutDir);
     }
 
+    const trimmedMaster = masterBankName.trim() || "Master";
     const payload: BakeBankRequest = {
       bankName: trimmedBank,
+      masterBankName: trimmedMaster,
       mode: "standalone",
       events: buildEventPayloads(),
       outputDirectory: trimmedOutDir !== "" ? trimmedOutDir : null,
@@ -549,7 +555,7 @@
       const v = await getVersion();
       if (v) appVersion = cleanVersion(v);
     } catch {
-      appVersion = "1.1.0";
+      appVersion = "1.1.1";
     }
 
     await loadConfig();
@@ -684,13 +690,13 @@
 
   <!-- Main Workspace -->
   <main class="mx-auto w-full max-w-4xl flex-1 px-5 py-5 space-y-4">
-    <!-- Top Bar: Bank Name Input & Editable Output Folder -->
+    <!-- Top Bar: Bank Name, Master Bank Name & Editable Output Folder -->
     <section
       class="rounded-xl border border-zinc-800/85 bg-zinc-900/50 p-4 shadow-xs"
     >
       <div class="flex flex-col sm:flex-row sm:items-end gap-3">
         <!-- Bank Name Input -->
-        <div class="sm:w-64 space-y-1">
+        <div class="sm:w-52 space-y-1">
           <label
             for="bank-name-input"
             class="block text-xs font-medium text-zinc-400"
@@ -711,6 +717,31 @@
             </span>
           </div>
         </div>
+
+        <!-- Master Bank Name Input (Shown when Include Master Banks is enabled) -->
+        {#if config.buildMasterBanks}
+          <div class="sm:w-52 space-y-1">
+            <label
+              for="master-bank-name-input"
+              class="block text-xs font-medium text-zinc-400"
+            >
+              Master Bank Name
+            </label>
+            <div class="relative flex items-center">
+              <Input
+                id="master-bank-name-input"
+                bind:value={masterBankName}
+                placeholder="Master"
+                class="pr-14 font-mono text-sm h-9 bg-zinc-950/80 border-zinc-800"
+              />
+              <span
+                class="pointer-events-none absolute right-3 text-xs font-mono text-amber-400/80"
+              >
+                .bank
+              </span>
+            </div>
+          </div>
+        {/if}
 
         <!-- Editable Output Folder with Direct Native Folder Picker on "Change" -->
         <div class="flex-1 space-y-1">
