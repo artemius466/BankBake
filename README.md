@@ -14,22 +14,38 @@ BankBake is a lightweight desktop tool that compiles audio files directly into F
 
 Requires [Rust](https://rustup.rs/), [Node.js](https://nodejs.org/), and `pnpm`.
 
-```powershell
+```sh
 # Install dependencies
-pnpm install
+pnpm install --frozen-lockfile
 
 # Run in development mode
 pnpm tauri dev
-
-# Build portable release (outputs to release/BankBake-Portable-v<version>-win-x64.zip)
-pnpm portable
 ```
+
+### Linux
+
+Install the Tauri system dependencies for your distribution. On Arch-based systems the desktop build uses `base-devel` and `webkit2gtk-4.1`. [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/#system-dependencies)
+
+BankBake supports two compiler setups on Linux.
+
+- Install FMOD Studio 2.02 for Linux. BankBake looks for `fmodstudiocl` on `PATH` and in `/opt/fmodstudio`. For another location, set **FMOD Studio CLI Path** in Settings to the executable or its containing folder. [FMOD downloads](https://www.fmod.com/download/design.html)
+- On x86-64, install Wine with `wine` and `winepath` on `PATH`. If BankBake cannot find a native compiler, it uses the bundled `fmodstudio/fmodstudiocl.exe` through Wine. Wine may initialize its prefix on the first bake.
+
+To try a bake, load the bundled samples, choose a writable output folder, and click **Bake Bank**. The Rust end-to-end bake test uses automatic compiler discovery. For a native compiler in a custom location, add its directory to `PATH` before running the test.
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml test_discover_compiler_and_bake_bank -- --ignored
+```
+
+### Portable builds
+
+Run `pnpm portable` to package the app in `release/`. Windows produces `BankBake-Portable-v<version>-win-x64.zip`. Linux uses `tar` to produce `BankBake-Portable-v<version>-linux-<arch>.tar.gz`. Extract the Linux archive and run `./bankbake` from the extracted folder. The target system needs GTK 3, WebKitGTK 4.1, and one of the compiler setups above.
 
 ## Tech Stack
 
 - **Backend**: Rust, Tauri 2
 - **Frontend**: Svelte 5, TypeScript, Tailwind CSS, WaveSurfer.js
-- **Compiler**: FMOD Studio 2.02 CLI (`fmodstudiocl.exe`)
+- **Compiler**: FMOD Studio 2.02 CLI
 
 ## License
 
