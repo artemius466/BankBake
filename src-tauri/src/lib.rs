@@ -203,7 +203,11 @@ fn list_sample_audio_files() -> Result<Vec<AudioFileInfo>, String> {
             roots.push(p.join("samples"));
         }
     }
-    roots.push(PathBuf::from("D:\\BankBake\\samples"));
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        if let Some(parent) = PathBuf::from(manifest_dir).parent() {
+            roots.push(parent.join("samples"));
+        }
+    }
 
     let filenames = [
         "ui_cancel.ogg",

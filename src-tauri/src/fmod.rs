@@ -256,7 +256,13 @@ pub fn find_bundled_compiler() -> Option<PathBuf> {
             }
         }
     }
-    candidate_roots.push(PathBuf::from("D:\\BankBake\\fmodstudio"));
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        let m_path = PathBuf::from(manifest_dir);
+        candidate_roots.push(m_path.join("fmodstudio"));
+        if let Some(parent) = m_path.parent() {
+            candidate_roots.push(parent.join("fmodstudio"));
+        }
+    }
 
     for root in candidate_roots {
         let cl = root.join("fmodstudiocl.exe");
@@ -713,13 +719,18 @@ pub fn create_temp_fmod_project(project_dir: &Path) -> Result<PathBuf, String> {
     )
     .map_err(|e| e.to_string())?;
 
+    // Generate a unique UUID for the Master Bank object on every build so that
+    // Master.bank and Master.strings.bank from two different mods never share
+    // the same internal bank GUID (preventing FMOD_ERR_EVENT_ALREADY_LOADED).
+    let master_bank_guid = format!("{{{}}}", Uuid::new_v4());
     fs::write(
         meta_dir
             .join("Bank")
-            .join("{816d4737-171a-41e7-a9f0-32996ece71cb}.xml"),
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+            .join(format!("{}.xml", master_bank_guid)),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <objects serializationModel="Studio.02.02.00">
-	<object class="Bank" id="{816d4737-171a-41e7-a9f0-32996ece71cb}">
+	<object class="Bank" id="{}">
 		<property name="name">
 			<value>Master</value>
 		</property>
@@ -727,11 +738,13 @@ pub fn create_temp_fmod_project(project_dir: &Path) -> Result<PathBuf, String> {
 			<value>true</value>
 		</property>
 		<relationship name="folder">
-			<destination>{07fb52a7-88b7-4b50-aff5-5f9728462f36}</destination>
+			<destination>{{07fb52a7-88b7-4b50-aff5-5f9728462f36}}</destination>
 		</relationship>
 	</object>
 </objects>
 "#,
+            master_bank_guid
+        ),
     )
     .map_err(|e| e.to_string())?;
 
@@ -1800,18 +1813,18 @@ mod tests {
         let info = discover_compiler(None);
         assert!(info.available, "Expected bundled FMOD Studio CLI to be discovered: {:?}", info);
 
-        let sample_ogg = PathBuf::from(
-            "D:\\BankBake\\samples\\ui_cancel.ogg",
-        );
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .to_path_buf();
+        let sample_ogg = workspace_root.join("samples").join("ui_cancel.ogg");
         assert!(sample_ogg.exists(), "Sample OGG asset must exist");
 
         let inspected = inspect_audio_file(&sample_ogg.to_string_lossy()).expect("inspect audio");
         assert_eq!(inspected.suggested_event_name, "ui_cancel");
         assert!(inspected.duration_seconds.unwrap_or(0.0) > 0.5);
 
-        let out_dir = PathBuf::from(
-            "C:\\Users\\Sasha\\.gemini\\antigravity\\brain\\057f2634-4f94-49e2-adbe-3cf802a33de8\\scratch\\rust_bake_test_out",
-        );
+        let out_dir = std::env::temp_dir().join("bankbake_test_out_1");
         let _ = fs::remove_dir_all(&out_dir);
 
         let req = BakeBankRequest {
@@ -1877,5 +1890,31 @@ mod tests {
         let guids = result.guids_content.expect("GUIDs content present");
         assert!(guids.contains("event:/sfx/player/ui_cancel_sfx"));
         assert!(guids.contains("event:/music/menu_loop_bgm"));
+
+        // Verify a second bake produces a distinct Master.bank / Master.strings.bank GUID
+        // so multiple mods can load their Master.bank and Master.strings.bank concurrently.
+        let out_dir_2 = std::env::temp_dir().join("bankbake_test_out_2");
+        let _ = fs::remove_dir_all(&out_dir_2);
+        let mut req2 = req.clone();
+        req2.bank_name = "SecondModBank".to_string();
+        req2.output_directory = Some(out_dir_2.to_string_lossy().to_string());
+        let result2 = execute_bake_bank(&req2, &cfg).expect("Second bake should succeed");
+        let guids2 = result2.guids_content.expect("Second GUIDs content present");
+
+        let master_guid_1 = guids
+            .lines()
+            .find(|l| l.ends_with(" bank:/Master"))
+            .expect("bank:/Master in guids 1");
+        let master_guid_2 = guids2
+            .lines()
+            .find(|l| l.ends_with(" bank:/Master"))
+            .expect("bank:/Master in guids 2");
+        assert_ne!(
+            master_guid_1, master_guid_2,
+            "Each baked mod must get a unique bank:/Master GUID so multiple mods don't collide"
+        );
+
+        let _ = fs::remove_dir_all(&out_dir);
+        let _ = fs::remove_dir_all(&out_dir_2);
     }
 }
